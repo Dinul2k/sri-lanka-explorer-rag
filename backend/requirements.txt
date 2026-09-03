@@ -1,0 +1,13 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+fastapi
+uvicorn
+redis
+psycopg2-binary
+pgvector
+huggingface-hub==0.16.4
+transformers==4.33.2
+sentence-transformers==2.2.2
+InstructorEmbedding
+pandas
+requests

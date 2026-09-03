@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+.venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Docker volumes (local data only)
+postgres_data/
+ollama_data/
+
+# Large data files - keep scripts but exclude raw/processed CSVs
+data_pipeline/raw_data/*.csv
+data_pipeline/processed_data/*.csv
+
+# Model cache
+*.cache/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/

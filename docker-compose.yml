@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  fastapi:
+    build: ./backend
+    container_name: tourism_fastapi
+    ports:
+      - "8001:8000"
+    environment:
+      - REDIS_URL=redis://redis_cache:6379
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=tourism_db
+      - POSTGRES_HOST=postgres_db
+      - POSTGRES_PORT=5432
+      - OLLAMA_URL=http://ollama_engine:11434
+      - ENABLE_CACHE=true
+    depends_on:
+      - redis_cache
+      - postgres_db
+      - ollama_engine
+    restart: always
+    volumes:
+      - ./data_pipeline:/app/data_pipeline
+      - ~/.cache/torch:/root/.cache/torch  # pre-downloaded instructor-base model
+
+  redis_cache:
+    image: redis/redis-stack-server:latest
+    container_name: tourism_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  postgres_db:
+    image: ankane/pgvector:latest
+    container_name: tourism_postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=tourism_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
+
+  ollama_engine:
+    image: ollama/ollama:latest
+    container_name: tourism_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: always
+
+  streamlit_frontend:
+    build: ./frontend
+    container_name: tourism_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://fastapi:8000/query
+    depends_on:
+      - fastapi
+    restart: always
+
+volumes:
+  postgres_data:
+  ollama_data:
