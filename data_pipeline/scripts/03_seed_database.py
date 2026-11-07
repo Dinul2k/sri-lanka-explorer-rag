@@ -6,9 +6,12 @@ from InstructorEmbedding import INSTRUCTOR
 
 def seed_db():
     print("Connecting to PostgreSQL...")
+    host = os.environ.get("POSTGRES_HOST", "127.0.0.1")
+    default_port = "5432" if host not in ("localhost", "127.0.0.1") else "5433"
+    port = os.environ.get("POSTGRES_PORT", default_port)
     conn = psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "localhost"),
-        port=os.environ.get("POSTGRES_PORT", "5432"),
+        host=host,
+        port=port,
         dbname=os.environ.get("POSTGRES_DB", "tourism_db"),
         user=os.environ.get("POSTGRES_USER", "postgres"),
         password=os.environ.get("POSTGRES_PASSWORD", "postgres")

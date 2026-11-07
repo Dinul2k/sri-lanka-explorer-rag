@@ -13,12 +13,21 @@ services:
       - POSTGRES_DB=tourism_db
       - POSTGRES_HOST=postgres_db
       - POSTGRES_PORT=5432
-      - OLLAMA_URL=http://ollama_engine:11434
+      # Default: host Ollama (Mac hybrid). For in-container LLM use profile + OLLAMA_URL=http://ollama_engine:11434
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - OLLAMA_NUM_THREAD=${OLLAMA_NUM_THREAD:-4}
+      - OLLAMA_NUM_PREDICT=${OLLAMA_NUM_PREDICT:-75}
+      - OLLAMA_NUM_PREDICT_LONG=${OLLAMA_NUM_PREDICT_LONG:-320}
+      - OLLAMA_TEMPERATURE=${OLLAMA_TEMPERATURE:-0.6}
       - ENABLE_CACHE=true
+    extra_hosts:
+      # Lets containers reach host Ollama on Docker Desktop (Mac/Windows)
+      - "host.docker.internal:host-gateway"
     depends_on:
       - redis_cache
       - postgres_db
-      - ollama_engine
     restart: always
     volumes:
       - ./data_pipeline:/app/data_pipeline
@@ -44,22 +53,23 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: always
 
+  # Optional: only started with --profile bundled-ollama
+  # On 8GB Macs prefer host Ollama + docker-compose.hybrid.yml instead
   ollama_engine:
     image: ollama/ollama:latest
     container_name: tourism_ollama
+    profiles: ["bundled-ollama"]
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     restart: always
 
-  streamlit_frontend:
+  web_frontend:
     build: ./frontend
     container_name: tourism_frontend
     ports:
-      - "8501:8501"
-    environment:
-      - API_URL=http://fastapi:8000/query
+      - "8501:80"
     depends_on:
       - fastapi
     restart: always

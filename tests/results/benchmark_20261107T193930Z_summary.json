@@ -1,0 +1,34 @@
+{
+  "created_at": "20261107T193930Z",
+  "api": "http://localhost:8001",
+  "model": "llama3.1:8b",
+  "cache_enabled": true,
+  "total_queries": 20,
+  "ok": 20,
+  "errors": 0,
+  "source_counts": {
+    "llama3_rag_fallback": 3,
+    "cache": 17
+  },
+  "expect_match_rate": 0.95,
+  "baseline_rag": {
+    "n": 3,
+    "mean_sec": 11.492099999999999,
+    "median_sec": 11.4123,
+    "p95_sec": 12.035549999999999,
+    "min_sec": 10.9592,
+    "max_sec": 12.1048
+  },
+  "solution_cache": {
+    "n": 17,
+    "mean_sec": 0.1162,
+    "median_sec": 0.1087,
+    "p95_sec": 0.14443999999999996,
+    "min_sec": 0.0955,
+    "max_sec": 0.187
+  },
+  "speedup_mean": 98.89931153184165,
+  "speedup_median": 104.98896044158234,
+  "wall_clock_sec": 36.45568730001105,
+  "raw_csv": "benchmark_20261107T193930Z.csv"
+}

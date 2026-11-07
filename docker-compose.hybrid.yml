@@ -1,0 +1,23 @@
+# Hybrid overlay: Ollama on the host (Metal/Windows), data services in Docker.
+#
+# Usage:
+#   1. Install Ollama on the host: https://ollama.com
+#   2. ollama pull llama3.1:8b
+#   3. docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d --build
+#
+# Optional .env:
+#   OLLAMA_MODEL=llama3.1:8b
+#   OLLAMA_KEEP_ALIVE=5m
+
+services:
+  fastapi:
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - OLLAMA_NUM_THREAD=${OLLAMA_NUM_THREAD:-4}
+      - OLLAMA_NUM_PREDICT=${OLLAMA_NUM_PREDICT:-75}
+      - OLLAMA_TEMPERATURE=${OLLAMA_TEMPERATURE:-0.6}
+    depends_on:
+      - redis_cache
+      - postgres_db

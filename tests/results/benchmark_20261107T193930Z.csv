@@ -1,0 +1,21 @@
+seq,id,family,role,district,intent,is_seed,expect_source,query,response_type,source,latency_sec,ok,error,source_match
+1,colombo-budget_food-00,colombo-budget_food,canonical,colombo,budget_food,True,llama3_rag_fallback,Best budget food in Colombo,short,llama3_rag_fallback,11.4123,True,,True
+2,colombo-budget_food-01,colombo-budget_food,paraphrase,colombo,budget_food,False,cache,Cheap places to eat in Colombo,short,cache,0.1301,True,,True
+3,colombo-budget_food-02,colombo-budget_food,paraphrase,colombo,budget_food,False,cache,Affordable local food recommendations for Colombo,short,cache,0.1087,True,,True
+4,colombo-budget_food-03,colombo-budget_food,paraphrase,colombo,budget_food,False,cache,Where can I find inexpensive meals in Colombo?,short,cache,0.1054,True,,True
+5,colombo-budget_food-04,colombo-budget_food,paraphrase,colombo,budget_food,False,cache,Budget-friendly restaurants and street food in Colombo,short,cache,0.1002,True,,True
+6,colombo-budget_food-05,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1004,True,,True
+7,colombo-budget_food-06,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1051,True,,True
+8,colombo-budget_food-07,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.0955,True,,True
+9,colombo-budget_food-08,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1023,True,,True
+10,colombo-budget_food-09,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.0979,True,,True
+11,colombo-budget_food-10,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1197,True,,True
+12,colombo-budget_food-11,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1303,True,,True
+13,colombo-budget_food-12,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1338,True,,True
+14,colombo-budget_food-13,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1870,True,,True
+15,colombo-budget_food-14,colombo-budget_food,exact_repeat,colombo,budget_food,False,cache,Best budget food in Colombo,short,cache,0.1036,True,,True
+16,colombo-tuk_tuk-00,colombo-tuk_tuk,canonical,colombo,tuk_tuk,True,llama3_rag_fallback,Tuk-tuk tips for getting around Colombo,short,llama3_rag_fallback,12.1048,True,,True
+17,colombo-tuk_tuk-01,colombo-tuk_tuk,paraphrase,colombo,tuk_tuk,False,cache,How should I ride three-wheelers in Colombo?,short,llama3_rag_fallback,10.9592,True,,False
+18,colombo-tuk_tuk-02,colombo-tuk_tuk,paraphrase,colombo,tuk_tuk,False,cache,Advice for tuk tuk fares in Colombo,short,cache,0.1145,True,,True
+19,colombo-tuk_tuk-03,colombo-tuk_tuk,paraphrase,colombo,tuk_tuk,False,cache,Is Grab or PickMe better for tuk-tuks in Colombo?,short,cache,0.1316,True,,True
+20,colombo-tuk_tuk-04,colombo-tuk_tuk,paraphrase,colombo,tuk_tuk,False,cache,Local transport tips using tuk-tuks in Colombo,short,cache,0.1093,True,,True
