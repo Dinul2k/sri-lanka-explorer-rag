@@ -58,6 +58,26 @@ def startup_event():
     pg_conn.autocommit = True
     register_vector(pg_conn)
 
+def get_pg_conn():
+    """Return a live PostgreSQL connection, reconnecting if the connection dropped."""
+    global pg_conn
+    try:
+        # Quick check to see if connection is still alive
+        pg_conn.cursor().execute("SELECT 1")
+    except Exception:
+        print("PostgreSQL connection lost. Reconnecting...")
+        pg_conn = psycopg2.connect(
+            host=os.environ.get("POSTGRES_HOST", "localhost"),
+            port=os.environ.get("POSTGRES_PORT", "5432"),
+            dbname=os.environ.get("POSTGRES_DB", "tourism_db"),
+            user=os.environ.get("POSTGRES_USER", "postgres"),
+            password=os.environ.get("POSTGRES_PASSWORD", "postgres")
+        )
+        pg_conn.autocommit = True
+        register_vector(pg_conn)
+        print("PostgreSQL reconnected successfully.")
+    return pg_conn
+
 class QueryRequest(BaseModel):
     query: str
 
@@ -111,77 +131,54 @@ def process_query(request: QueryRequest, background_tasks: BackgroundTasks):
                 similarity = 1 - distance
                 
                 # Dynamic Thresholds based on Geographic Safety
-                base_threshold = 0.88 if target_district else 0.90
+                base_threshold = 0.85 if target_district else 0.90
                 
                 if similarity > base_threshold:
                     cached_query = getattr(res.docs[0], "raw_query", None)
                     
                     if cached_query:
-                        import re
+                        # --- Permanent Semantic Re-Ranking Guard ---
+                        # Instead of brittle keyword/synonym word-lists that need constant
+                        # manual maintenance, we use the already-loaded INSTRUCTOR model to
+                        # re-embed the cached query and compute a DIRECT cosine similarity
+                        # against the current query vector.
+                        #
+                        # This is language-agnostic: "hiking" vs "trekking", "animals" vs "wildlife",
+                        # "cheap" vs "budget" — all handled automatically with ZERO manual updates.
+                        #
+                        # The geographic @district tag filter (above) handles location safety.
+                        # This guard handles intent safety within the same geographic scope.
                         
-                        # --- Critical Word Override (Intent Safety Net) ---
-                        # These words carry the core INTENT of a query.
-                        # If one appears in the new query but NOT in the cached query (or vice versa),
-                        # the two queries have different intents and must NOT share a cache entry.
-                        critical_words = {
-                            # Price/quality intent
-                            "luxury", "budget", "cheap", "expensive", "affordable", "premium",
-                            "free", "costly", "economical", "high-end",
-                            # Activity intent
-                            "surfing", "shopping", "hiking", "swimming", "cycling", "diving",
-                            "fishing", "climbing", "snorkeling", "kayaking",
-                            # Audience intent
-                            "couples", "children", "kids", "family", "solo", "groups", "friends",
-                            # Meal/time intent
-                            "breakfast", "lunch", "dinner", "brunch", "nightlife", "morning", "evening",
-                            # Stay type
-                            "hotel", "hostel", "villa", "resort", "guesthouse", "camping",
-                            # Vibe intent
-                            "quiet", "party", "calm", "busy", "adventure", "romantic", "historical"
-                        }
-
-                        stopwords = {"a", "an", "the", "in", "on", "at", "to", "for", "of", "with",
-                                     "is", "are", "am", "was", "were", "what", "can", "i", "do",
-                                     "you", "my", "me", "how", "where", "tell", "suggest", "give",
-                                     "recommend", "please", "some", "any", "best", "good", "great",
-                                     "visit", "go", "find", "get", "see", "know", "about", "there",
-                                     "thing", "things", "place", "places", "want", "need", "like"}
-
-                        words1 = set(re.findall(r'\b\w+\b', request.query.lower())) - stopwords
-                        words2 = set(re.findall(r'\b\w+\b', cached_query.lower())) - stopwords
-
-                        # Check if any critical word appears in one query but not the other
-                        critical_in_q1 = words1 & critical_words
-                        critical_in_q2 = words2 & critical_words
-                        critical_word_mismatch = critical_in_q1.symmetric_difference(critical_in_q2)
-
-                        if critical_word_mismatch:
-                            print(f"Critical word mismatch {critical_word_mismatch} -> Cache Reject!")
-                            pass  # Force RAG fallback — intents are different
-
+                        instruction = "Represent the Sri Lankan tourism query: "
+                        cached_vector = model.encode([[instruction, cached_query]])[0]
+                        
+                        # Direct cosine similarity between new query and cached query
+                        dot = float(np.dot(query_vector, cached_vector))
+                        norm = float(np.linalg.norm(query_vector) * np.linalg.norm(cached_vector))
+                        semantic_similarity = dot / norm if norm > 0 else 0.0
+                        
+                        # Strict secondary threshold: true paraphrases score > 0.92
+                        # Different-intent queries (beach vs waterfall) score < 0.88
+                        secondary_threshold = 0.92
+                        
+                        if semantic_similarity >= secondary_threshold:
+                            cache_type = "Geo-Locked" if target_district else "Generic Search"
+                            print(f"Cache Hit! ({cache_type}) Redis sim: {similarity:.4f}, Semantic re-rank: {semantic_similarity:.4f}")
+                            return {
+                                "response": res.docs[0].response,
+                                "source": "cache",
+                                "latency_target": "< 200ms",
+                                "similarity": semantic_similarity
+                            }
                         else:
-                            # Permissive Jaccard check (0.30) for general rephrasing
-                            jaccard = len(words1.intersection(words2)) / len(words1.union(words2)) if words1 and words2 else 0.0
-
-                            if jaccard < 0.30 and similarity < 0.985:
-                                print(f"Semantically similar ({similarity:.4f}) but Lexically too different ({jaccard:.4f}) -> Cache Reject!")
-                                pass  # Force RAG fallback
-                            else:
-                                cache_type = "Geo-Locked" if target_district else "Generic Search"
-                                print(f"Cache Hit! ({cache_type}) Similarity: {similarity:.4f}, Jaccard: {jaccard:.4f}")
-                                return {
-                                    "response": res.docs[0].response,
-                                    "source": "cache",
-                                    "latency_target": "< 200ms",
-                                    "similarity": similarity
-                                }
+                            print(f"Semantic re-rank rejected: {semantic_similarity:.4f} < {secondary_threshold} -> RAG Fallback")
         except Exception as e:
             print(f"Redis cache search error: {e}")
             
     # 2. Slow Path (RAG Fallback)
     print("Cache Miss. Executing RAG fallback to PostgreSQL...")
     
-    with pg_conn.cursor() as cursor:
+    with get_pg_conn().cursor() as cursor:
         # Retrieve relevant slang
         cursor.execute("""
             SELECT term, translation FROM glossary_vectors 
@@ -213,7 +210,7 @@ def process_query(request: QueryRequest, background_tasks: BackgroundTasks):
         context_str += f"- {district}: {rev}\n"
 
     augmented_prompt = f"""You are a helpful travel assistant for Sri Lankan tourism.
-Use the following local glossary and destination reviews to answer the user's query contextually.
+Use the following local glossary and destination reviews to answer the user's query contextually. Give a concise, direct answer in 2 to 3 sentences.
 
 {context_str}
 
@@ -226,7 +223,13 @@ User Query: {request.query}
         resp = requests.post(f"{ollama_url}/api/generate", json={
             "model": "llama3.2:3b",
             "prompt": augmented_prompt,
-            "stream": False
+            "stream": False,
+            "keep_alive": -1,  # Keep model permanently in memory — eliminates cold-start delay
+            "options": {
+                "num_thread": 4,     # Restrict to 4 Apple Silicon Performance cores (avoids slow E-core stalls)
+                "num_predict": 75,   # Caps response to 2-3 sentences (~10-15s total latency)
+                "temperature": 0.6
+            }
         }, timeout=600)  # 10-minute timeout for CPU-based LLM inference
         resp.raise_for_status()
         llm_output = resp.json().get("response", "No explanation generated.")

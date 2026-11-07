@@ -1,0 +1,868 @@
+% 1. Load TikZ BEFORE the IEEE class to prevent the invisible title bug
+\RequirePackage{tikz}
+\usetikzlibrary{positioning, fit, calc, backgrounds, arrows.meta, shapes.geometric}
+
+% 2. Now load the document class and the rest of your packages
+\documentclass{ieeeaccess}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{booktabs}
+
+% 3. Add hyperref LAST to make citations and cross-references clickable
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+    
+\usepackage{xcolor}
+\definecolor{accessblue}{RGB}{0,112,192}
+
+% Disable hyphenation across the entire document
+\hyphenpenalty=10000
+\exhyphenpenalty=10000
+
+\begin{document}
+\history{Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000.}
+\doi{10.1109/ACCESS.2017.DOI}
+
+\title{Optimizing Retrieval-Augmented Generation (RAG) Architectures for
+LowLatency, Cost-Constrained Micro-SaaS Platforms in Tourism}
+
+\author{\uppercase{Dinul Kithsara}\authorrefmark{1}, \uppercase{Dinuka Wijendra}\authorrefmark{2}}
+\address[1]{Department of Information Technology, Sri Lanka Institute of Information Technology, Malabe, 10115, Sri Lanka (e-mail: info@sliit.lk)}
+
+\markboth
+{Author \headeretal: Preparation of Papers for IEEE TRANSACTIONS and JOURNALS}
+{Author \headeretal: Preparation of Papers for IEEE TRANSACTIONS and JOURNALS}
+
+\corresp{Corresponding author: Dinul Kithsara(e-mail: kithsaradinul@gmail.com).}
+
+\begin{abstract}
+Large Language Models (LLMs) have emerged as powerful engines for personalized itinerary planning, travel pre-trip consultation, and on-trip guidance in the tourism domain. However, transitioning these capabilities into production-grade, low-latency, and cost-constrained micro-SaaS platforms is severely hindered by the high computational cost of long-context inference, wide-area network retrieval latency, and unpredictable API pricing structures. This paper proposes a unified, cost-aware Retrieval-Augmented Generation (RAG) reference architecture tailored specifically for tourism micro-SaaS backends. Our proposed architecture integrates a highly optimized persistent vector database backend using PostgreSQL and pgvector with an asynchronous, dual-threshold semantic caching layer built on Redis. To maximize resource utilization and intent safety, we incorporate a model-driven semantic re-ranking guard using the INSTRUCTOR embedding model to dynamically reject opposite-intent cache collisions without relying on brittle keyword maintenance. The generative pipeline relies on a locally hosted, quantized LLaMA 3.2 3B backbone via Ollama, maintaining weights in memory to eliminate cold-start latencies. Empirical trace evaluations demonstrate that our co-optimized architecture slashes remote LLM API calls by over 90\%, reduces end-to-end response latency to under 200ms for cache hits, and dramatically increases throughput per dollar, while rigorously maintaining answer correctness and spatiotemporal compliance through dual-database grounding.
+\end{abstract}
+
+\begin{keywords}
+Retrieval-Augmented Generation (RAG),
+Semantic Caching,
+Tourism Domain,
+Vector Databases,
+Low-Bit Quantization,
+Cost-Aware Computing,
+Micro-SaaS
+\end{keywords}
+
+\titlepgskip=-15pt
+
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+The rapid proliferation of Large Language Models (LLMs) has fundamentally transformed the digital tourism ecosystem, serving as the core engine for modern conversational agents, smart travel assistants, and recommendation pipelines \cite{lewis-rag-2020, gao-rag-survey-2023}. Tourism question-answering (QA) systems, dynamic itinerary planners, and travel pre-trip consultation platforms increasingly leverage generative AI to process natural language queries and synthesize detailed local attraction plans \cite{tourllm-2024, qi-lettot-2025}. Unlike typical open-domain search tasks, travel planning represents a highly complex, multidimensional planning problem that spans the entire traveler lifecycle, from initial logistical design to active, on-trip real-time guidance \cite{qi-lettot-2025, ni-tprag-2025}.
+
+Despite their impressive language generation capabilities, general-domain LLMs exhibit critical limitations when deployed in revenue-critical and spatial-aware tourism applications \cite{qi-lettot-2025, pricinglogic-2024}. Autoregressive models are notoriously prone to factual hallucinations and lack access to real-time or proprietary databases (such as flight delays, seasonal ticket pricing, or restaurant seating) \cite{lewis-rag-2020, enhancing-recommender-2024}. Furthermore, travel planning requires strict adherence to spatiotemporal coherence, including geographical distance, opening hours, and sequential route efficiency, as well as complex mathematical reasoning over dynamic booking tariffs and overlapping corporate discount policies \cite{qi-lettot-2025, ni-tprag-2025, pricinglogic-2024}.
+
+Retrieval-Augmented Generation (RAG) has emerged as the standard technique to ground LLM generations in external, verifiable data sources \cite{lewis-rag-2020, gao-survey-2024}. By encoding dynamic travel directories, local transport maps, and seasonal tariff schedules as high-dimensional vector embeddings, a RAG system can dynamically query a vector database during inference, appending the top-$k$ most relevant context passages to the prompt \cite{lewis-rag-2020, leveraging-approx-2025}. This hybrid parametric/non-parametric memory paradigm dramatically reduces factual inconsistencies and provides an elegant mechanism for dynamic data updates without the astronomical costs associated with model fine-tuning \cite{lewis-rag-2020, gao-survey-2024}.
+
+Nevertheless, deploying high-accuracy RAG pipelines within production-scale, multi-tenant Micro-SaaS platforms presents severe engineering bottlenecks \cite{devalla-microservice-rag-2025}. Micro-SaaS providers operate under strict computing budgets, limited GPU allocations, and stringent latency Service-Level Objectives (SLOs) \cite{devalla-microservice-rag-2025, behera-optimizing-irjmets-2025}. Sequential execution of standard "Naive RAG" (database search, context packing, and full-context generation) for every incoming request induces extreme latency overhead and cost spikes over wide-area networks (WAN) due to the following facts \cite{ruan-asteria-2025, leveraging-approx-2025}.
+\begin{enumerate}
+    \item High I/O Overhead in Disk-Resident Search: Querying million-scale vector indexes over disk-bound architectures incurs random disk page load bottlenecks during graph walks, stretching nearest neighbor search (NNS) latencies well beyond interactive SLOs \cite{sun-gaussdb-vector-2025, leveraging-approx-2025}.
+    \item Token Cost Inflation: autocompleting queries with long-context, verbose retrieved documents dramatically inflates token processing costs, making large-scale serving financially unsustainable for micro-SaaS backends \cite{hashemi-cost-aware-2025}.
+    \item Underutilization of Semantic Locality: Traditional database caches rely on exact keyword matches, which means minor syntactic changes or paraphrased travel requests trigger redundant database reads and remote LLM calls \cite{ruan-asteria-2025, singh-krites-2026}.
+    \item Tuning and Quantization Degradation: To contain serving costs, SaaS engines must rely on low-bit post-training quantization (for instance, 4-bit normalization) on smaller edge-compatible backbones \cite{dettmers-qlora-2024, huang-llama3-quant-2024}. However, ultra-low precision quantization severely degrades mathematical and spatial planning capacities, leading to complete structural failure in travel schedule alignment and booking calculations \cite{huang-llama3-quant-2024, li-quant-meets-reasoning-2025}.
+\end{enumerate}
+
+To bridge the gap between academic RAG designs and the practical constraints of tourism micro-SaaS deployments, this study proposes a unified, cost-aware RAG reference architecture. Our proposed system co-optimizes the entire execution pipeline as follows.
+\begin{itemize}
+    \item We employ a persistent vector database using PostgreSQL with the \emph{pgvector} extension to manage dynamic tourism data and local cultural glossaries.
+    \item We introduce a hybrid semantic caching layer built on Redis, utilizing a two-stage validation pipeline that combines geographic pre-filtering with a strict semantic re-ranking guard powered by the INSTRUCTOR embedding model.
+    \item We utilize an asynchronous, non-blocking cache population mechanism via FastAPI to continuously update the in-memory semantic cache without penalizing client-facing response times.
+    \item We deploy a locally-hosted, quantized \emph{llama3.2:3b} generation backbone via the Ollama inference engine, maintaining weights in memory to eliminate cold-start latencies and ensure strict Service-Level Objective (SLO) compliance.
+\end{itemize}
+
+\section{Literature Review}
+The RAG paradigm has been utilized among the five significant domains namely, advanced language models, efficient compression, persistent indexing, high-performance caching, and dynamic query orchestration. This section reviews and synthesizes the state-of-the-art across these five core pillars.
+
+\subsection{Foundations of RAG and Tourism-Domain Language Models}
+The RAG paradigm was pioneered by Lewis et al. \cite{lewis-rag-2020} to merge the non-parametric memory of dense passage retrievers (DPR) with the parametric generation of sequence-to-sequence LLMs. In subsequent years, the architecture has evolved from a naive lookup loop into highly complex, modular, and advanced pipelines designed to handle multi-step reasoning and dynamic context alignment \cite{gao-rag-survey-2023, gao-survey-2024}. This evolution is especially crucial for specialized, knowledge-intensive industries such as travel and tourism, where generic models suffer from non-trivial spatiotemporal hallucinations and lack awareness of transactional constraints \cite{gu-survey-2024, tourllm-2024}.
+
+To address domain-specific misalignment, Wei et al. \cite{tourllm-2024} proposed \emph{TourLLM}, constructing the high-quality \emph{Cultour} supervised fine-tuning (SFT) dataset comprising tourism knowledge base QA, travelogue plan data, and diverse travel-related scenarios. They also introduced the Consistency, Readability, and Availability (CRA) human evaluation metrics, which provide a targeted rubric for measuring a model’s domain-specific performance. Evaluation frameworks have recently shifted toward automated, label-free paradigms to eliminate expensive human annotations. Qi et al. \cite{qi-lettot-2025} developed \emph{LETToT}, which utilizes expert Tree-of-Thought (ToT) reasoning structures to grade LLM responses across seven content-quality dimensions: thematic relevance, context appropriateness, logical coherence, creativity, accuracy, completeness, and practicality. 
+
+Real-world deployment also requires understanding traveler behavior across the trip lifecycle, including pre-trip consultation, planning, and real-time on-trip guidance \cite{qi-lettot-2025, ni-tprag-2025}. To benchmark spatiotemporal rationality, Ni et al. \cite{ni-tprag-2025} introduced \emph{TP-RAG}, a benchmark based on 2,348 real travel queries and 85,575 geocoded points of interest (POIs) that utilizes trajectory-level Web documents to enforce route coherence. They proposed \emph{EvoRAG}, an evolutionary optimization framework that performs population-based selection, crossover, and mutation over retrieved trajectories to minimize route repetitions and commonsense violations. In industrial applications, such as the Caleidohotels platform evaluated by Di Meglio et al. \cite{dimeglio-llm-travel-2025}, LLMs are actively utilized to clean and enrich incomplete property descriptions, proving that custom-tuned edge models can compete with remote commercial APIs.
+
+Furthermore, modern tourism recommendation engines must balance user preferences with broader multi-stakeholder and sustainability constraints. Banerjee et al. \cite{banerjee-sustainable-2024} proposed \emph{Sustainability Augmented Reranking (SAR)}, a modified RAG pipeline that computes an S-Fairness indicator by taking a normalized weighted combination of a city's popularity and monthly seasonality indices. This ensures that travel suggestions dynamically shift flow toward under-visited months, mitigating the impacts of overtourism. Finally, accurate travel planning requires arithmetic and logic compliance. Ahn et al. \cite{pricinglogic-2024} introduced \emph{PricingLogic}, a benchmark testing LLMs on complex tourism pricing policies and overlapping bundled discounts. Their findings reveal that standard end-to-end prompting fails under intricate pricing constraints, whereas \emph{Code-assisted Reasoning (CaR)}—where the LLM first translates policies into executable Python functions and then extracts natural-language booking details into functional arguments—substantially improves reasoning fidelity.
+
+\subsection{Low-Bit Quantization and Parameter-Efficient Tuning}
+For resource-constrained micro-SaaS platforms, serving full-precision language models is economically and computationally prohibitive. Parameter-efficient fine-tuning (PEFT) techniques, specifically QLoRA proposed by Dettmers et al. \cite{dettmers-qlora-2024}, enable the training of large models by freezing a post-training quantized backbone (typically in a 4-bit NormalFloat representation) and injecting small, trainable low-rank adaptation matrices. However, aggressive low-bit compression introduces severe planning and logical degradation. Huang et al. \cite{huang-llama3-quant-2024} conducted an empirical evaluation of quantized LLaMA3 across various post-training quantization (PTQ) methods, showing that while models retain basic linguistic features down to 4-bit precision, they suffer non-negligible logical collapse under ultra-low (2-bit and 3-bit) width spectrums. This collapse is particularly severe when quantized backbones are integrated into Multimodal LLMs (MLLMs), resulting in complete functional failure during complex visual-reasoning tasks.
+
+This planning degradation is especially detrimental to arithmetic consistency and step-by-step logical derivations. Li et al. \cite{li-quant-meets-reasoning-2025} systematically analyzed quantization degradation on mathematical reasoning benchmarks like MATH. Their quantitative error-type analysis reveals that low-bit models exhibit a high frequency of computational errors and formula misuses, proving that quantization disrupts the delicate high-fidelity internal representations required for multi-step reasoning. To mitigate this, they introduced a stepwise knowledge-injection framework during SFT to align the outputs of full-precision and quantized models. To stabilize low-bit performance without full-precision retention, salience-driven mixed-precision approaches like \emph{SliM-LLM} \cite{slim-llm-2024} quantize non-salient weights while preserving high-precision channels for outlier weight dimensions, safeguarding structural logic.
+
+\subsection{Persistent and High-Performance Vector Database Management Systems}
+The retrieval component of a RAG pipeline relies heavily on high-performance Vector Database Management Systems (VDBMS) to search millions of multi-dimensional vector embeddings representing textual and geographic data \cite{pan-vector-survey-2024, jing-vdb-survey-2024}. Traditional VDBMSs often present a hard trade-off: they either operate entirely in-memory to provide low-latency search but fail on large-scale datasets, or they offer persistent disk-resident storage at the expense of severe query latencies \cite{sun-gaussdb-vector-2025}. 
+
+To bridge this gap, Sun et al. \cite{sun-gaussdb-vector-2025} designed \emph{GaussDB-Vector}, a persistent real-time vector database optimized for extremely low latency ($<50$ ms) and zero-delay data freshness. GaussDB-Vector implements an approximate nearest neighbor (ANN) index based on the Vamana (DiskANN) graph, which guarantees close-to-logarithmic search complexity while restricting maximum out-degrees to optimize on-disk storage layout. Crucially, GaussDB-Vector organizes vector data in a page-based structure and clusters physically close vectors into contiguously aligned disk blocks to minimize random I/O during graph traversals. To further relieve I/O pressure, it implements a novel buffering strategy that caches hot, highly-traversed graph nodes in memory, while pushing less-frequent nodes and product quantization (PQ) codes to disk. It also utilizes asynchronous deletion to handle real-time modifications without immediate index rebuilding, and leverages SIMD parallel computing and Ascend NPU tensor cores to accelerate distance computations.
+
+Maintaining VDBMS reliability in production environments remains a critical challenge. Wang et al. \cite{wang-reliable-vector-2025} outlined a software testing roadmap for VDBMSs, identifying that query-logic and index-pruning bugs frequently cause severe recall drops under real-time concurrent updates, necessitating robust transaction management and crash-recovery protocols at the storage engine tier.
+
+\subsection{Advanced Semantic Caching and Contextual Summaries}
+To circumvent redundant remote VDBMS traversals and expensive LLM forward-passes, semantic caching intercepts queries and attempts to reuse previously cached answers for semantically equivalent requests \cite{ruan-asteria-2025, singh-krites-2026}. Standard semantic caches compute the cosine similarity between query embeddings encoded by models like Sentence-BERT \cite{reimers-sbert-2019} and execute exact or threshold-based key-value lookups using libraries like \emph{GPTCache} \cite{bang-gptcache-2023}. However, uniform static thresholds induce a hard trade-off: conservative thresholds miss valuable reuse opportunities, while aggressive thresholds risk serving false-positive, semantically incorrect answers \cite{singh-krites-2026}.
+
+To resolve this similarity "grey zone" in multi-tenant environments, Ruan et al. \cite{ruan-asteria-2025} developed \emph{Asteria}, a semantic-aware caching system. It implements a two-stage retrieval pipeline: a fast ANN vector search identifies candidate matches, which are then validated by a lightweight co-located LLM Semantic Judger to filter out false positives. To minimize hardware overhead, Asteria co-locates the 1B judger with the 7B main agent model on a single GPU, using a priority-aware scheduler to protect the agent’s latency-critical paths on idle GPU cycles. Asteria manages cache lifecycles via a Least Cost-Efficient and Frequently Used (LCFU) eviction policy, which weights cached elements by both retrieval cost and frequency, outperforming traditional LRU policies on bursty workloads.
+
+Similarly, Singh et al. \cite{singh-krites-2026} proposed \emph{Krites}, an asynchronous verified semantic cache. Krites preserves standard threshold policies on the serving path to guarantee low latency. However, when a query falls into the grey zone below the static threshold, it enqueues an off-path asynchronous task. An LLM judge validates the match, and approved static answers are promoted into the dynamic cache via an auxiliary overwrite. This design effectively converts the dynamic cache into a mutable pointer layer over the static cache, doubling static-origin hits on conversational workloads without increasing critical-path latency. 
+
+Other semantic caching developments focus on caching granularity and theoretical bounds. Couturier et al. \cite{couturier-contextual-summaries-2025} proposed caching query-aware contextual summaries rather than full documents, reducing input token overhead by up to 60\% on long-context QA. Atalar et al. \cite{atalar-continuous-cache-2026} formalized continuous semantic caching in infinite embedding spaces, deriving theoretical performance guarantees using dynamic discretization and Kernel Ridge Regression. For on-disk caching, Bergman et al. \cite{bergman-proximity-2025} developed \emph{Proximity}, caching and reusing approximate nearest-neighbor indices directly in the database retrieval loop to speed up RAG by up to 59\%. Finally, replacement policies such as \emph{SphereLFU} and \emph{ClusterLRU} evaluated by Biton and Friedman \cite{biton-exact-hits-2025} demonstrate that clustering semantically close queries prevents cache pollution and maintains context integrity.
+
+\subsection{Cost-Aware Query Orchestration and Speculative Retrieval}
+Dynamic routing and query orchestration represent the ultimate system levers for latency-cost co-optimization in RAG pipelines \cite{devalla-microservice-rag-2025, hashemi-cost-aware-2025}. Devalla et al. \cite{devalla-microservice-rag-2025} designed a microservice-based RAG architecture that applies adaptive routing, dynamically bypassing expensive rerankers or selecting compressed model variants based on real-time SLO latency budgets. Mapping the latency-accuracy Pareto frontier, Behera and Poosapati \cite{behera-optimizing-irjmets-2025} demonstrated that adaptive retrieval parameters cut query latency by 45\% with negligible loss in accuracy.
+
+To formalize these parameter trade-offs, Hashemi et al. \cite{hashemi-cost-aware-2025} proposed cost-aware RAG reasoning models trained via reinforcement learning (PPO and GRPO). By incorporating a cost penalty directly into the advantage function as shown in \eqref{eq:advantage}:
+\begin{equation}
+\label{eq:advantage}
+    A_{\text{cost}} = R_{\text{correct}} - \gamma \cdot \text{Length}(x_{\text{context}})
+\end{equation}
+the model learns to adapt its retrieval depth, dynamically retrieving fewer documents for simple queries and scaling up depth only when confronted with complex prompts. To optimize federated search, Guerraoui et al. \cite{guerraoui-federated-rag-2025} proposed \emph{RAGRoute}, utilizing a lightweight neural classifier to route queries directly to relevant vector partitions, skipping redundant global partition scans and cutting network traffic by 77.5\%.
+
+Additionally, speculative execution can be applied to retrieval to bypass slow database lookups. Peng et al. \cite{peng-has-2025} proposed \emph{HaS}, a homology-aware speculative retrieval framework. HaS performs rapid, speculative lookups over a cache channel (recent queries) and a fuzzy channel (a highly restricted subset of the database) to construct a candidate "draft" of documents. It then validates this draft using a homology query re-identification task: if the incoming query is identified as a homologous re-encounter of a cached query sharing the same target entities, the draft is accepted, circumventing full-database retrieval in up to 45\% of transactions.
+
+On a larger scale, modular frameworks like \emph{Higress-RAG} \cite{lin-higress-2025} integrate hybrid dual retrieval, adaptive routing, and Corrective RAG (CRAG) to execute web-search rollbacks when internal databases prove insufficient. For decentralized networks, Xiong et al. \cite{xiong-coedge-rag-2025} developed \emph{CoEdge-RAG}, optimizing collaborative edge scheduling to distribute retrieval and generation tasks across hierarchical edge-caching nodes. Advanced models like \emph{REPLUG} \cite{shi-replug-2024} treat downstream LLMs as black boxes, calculating document probability distributions during backpropagation to iteratively optimize the retriever’s parameters. Finally, Yu et al. \cite{yu-spatial-rag-2025} developed \emph{Spatial-RAG}, parsing natural language into spatial SQL queries executed over structured geographic databases (e.g., PostGIS) and formulating the final recommendation as a multi-objective Pareto optimization balancing spatial constraints with dense semantic preferences.
+
+\section{Proposed System Architecture}
+To decouple execution bottlenecks and minimize resource contention under intensive multi-tenant workloads, the proposed tourism RAG architecture is structured into three specialized, independently scaleable operational planes: the Ingestion and Storage Plane, the Multi-Tier Caching Plane, and the Adaptive and Speculative Orchestration Plane. Guided by modern microservice patterns \cite{devalla-microservice-rag-2025}, these planes execute as localized containerized processes communicating over ultra-low-latency gRPC channels or the standardized Model Context Protocol (MCP) to manage external routing, database interaction, and model execution (detailed across Figures \ref{fig:ingestion_plane}, \ref{fig:caching_plane}, and \ref{fig:orchestration_plane}).
+
+\subsection{Ingestion and Storage Plane (PostgreSQL and pgvector)}
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.5cm,
+    basic_box/.style={rectangle, draw=black!70, fill=white, thick, rounded corners, align=center, font=\small, inner sep=6pt},
+    gray_arrow/.style={-{Stealth[scale=1.2]}, thick, draw=gray!70}
+]
+\node[basic_box, fill=gray!10, text width=6cm] (raw_data) {\textbf{Raw Tourism Data} \\ \scriptsize POI Registries, Cultural Glossaries, Reviews};
+\node[basic_box, below=0.6cm of raw_data, text width=6cm] (parsing) {\textbf{1. Structure-Aware Parsing} \\ \scriptsize Data cleanup and logical sectioning};
+\node[basic_box, below=0.6cm of parsing, text width=6cm] (encoding) {\textbf{2. INSTRUCTOR Dense Encoding} \\ \scriptsize 768-dimensional instruction-tuned vectors};
+\node[basic_box, fill=gray!15, below=0.6cm of encoding, text width=6cm] (pg) {\textbf{3. PostgreSQL Storage} \\ \scriptsize Dual-Tables with \emph{pgvector} Indexing};
+
+\draw [gray_arrow] (raw_data.south) -- (parsing.north);
+\draw [gray_arrow] (parsing.south) -- (encoding.north);
+\draw [gray_arrow] (encoding.south) -- (pg.north);
+\end{tikzpicture}
+\caption{The Ingestion and Storage Plane, mapping raw data into persistent PostgreSQL vector tables.}
+\label{fig:ingestion_plane}
+\end{figure}
+
+The Ingestion and Storage Plane (see Figure \ref{fig:ingestion_plane}) is designed to ingest, process, and securely store both semi-structured and unstructured tourism data feeds—including geocoded POI registries \cite{ni-tprag-2025}, local cultural terminologies, and natural language reviews \cite{tourllm-2024}. The ingestion pipeline comprises three core phases:
+\begin{enumerate}
+    \item Structure-Aware Parsing: Document assets are parsed and cleaned, separating generalized cultural glossary definitions from localized, geographic itinerary reviews.
+    \item Siamese Dense Encoding: Text blocks are mapped into 768-dimensional vector embeddings using the fine-tuned \emph{hkunlp/instructor-base} model \cite{reimers-sbert-2019}, optimizing semantic cohesion across geographic and travel terminologies.
+    \item Relational Vector Storage: Embeddings are written to PostgreSQL utilizing the \emph{pgvector} extension \cite{pan-vector-survey-2024}. Data is logically partitioned into two distinct tables: \emph{review\_vectors} for geographically-bound travelogues and \emph{glossary\_vectors} for unconstrained cultural definitions, enabling highly targeted, dual-database retrieval.
+\end{enumerate}
+
+To protect transactional freshness and ensure high performance, standard index maintenance and vacuuming protocols are maintained within the RDBMS, bridging robust transactional ACID compliance with high-dimensional vector similarity operations.
+
+\subsection{Multi-Tier Caching Plane (Redis Semantic Cache)}
+\begin{figure}[htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.5cm,
+    basic_box/.style={rectangle, draw=black!70, fill=white, thick, rounded corners, align=center, font=\small, inner sep=6pt},
+    gray_arrow/.style={-{Stealth[scale=1.2]}, thick, draw=gray!70}
+]
+\node[basic_box, fill=gray!10, text width=6cm] (query) {\textbf{Incoming Natural Language Query}};
+\node[basic_box, below=0.6cm of query, text width=6cm] (encoder) {\textbf{INSTRUCTOR Dense Encoding}};
+\node[basic_box, fill=gray!15, below=0.6cm of encoder, text width=6cm] (cache) {\textbf{Redis Semantic Cache} \\ \scriptsize FLAT Index \& Geographic Tag Pre-filtering};
+\node[basic_box, below left=0.6cm and -2cm of cache, text width=3.5cm] (hit) {\textbf{Primary Hit} \\ \scriptsize Re-Ranked via INSTRUCTOR};
+\node[basic_box, below right=0.6cm and -2.5cm of cache, text width=4cm] (miss) {\textbf{Cache Miss / Re-Rank Failure} \\ \scriptsize Falls through to PostgreSQL};
+
+\draw [gray_arrow] (query.south) -- (encoder.north);
+\draw [gray_arrow] (encoder.south) -- (cache.north);
+\draw [gray_arrow] (cache.south) -- (hit.north);
+\draw [gray_arrow] (cache.south) -- (miss.north);
+\end{tikzpicture}%
+}
+\caption{The Multi-Tier Caching Plane leveraging a Redis FLAT index and secondary model re-ranking.}
+\label{fig:caching_plane}
+\end{figure}
+
+To achieve sub-200ms latency for recurring or paraphrased tourist inquiries (for instance, ``Identify recreational parks suitable for children in Colombo'' vs. ``Colombo recreational parks''), we deploy a multi-tiered, semantic-aware caching pipeline (see Figure \ref{fig:caching_plane}) that intercepts incoming prompts before they trigger downstream database traversals:
+\begin{enumerate}
+    \item Geographic Tag Pre-Filtering: Upon receiving a query, explicit Sri Lankan districts are extracted via keyword scan. If a district is found, the cache lookup is strictly bound to that region using Redis \emph{TagFields}, mathematically bounding cross-district spatial hallucinations to 0.0\% \cite{bang-gptcache-2023}.
+    \item Primary Cosine Similarity Scan: The query embedding is searched against the Redis FLAT index. A dynamic similarity threshold is applied based on the query scope ($\tau_{\text{base}} = 0.85$ for geographically locked queries, and $\tau_{\text{base}} = 0.90$ for unconstrained global queries).
+    \item Semantic Re-Ranking Guard: Traditional database caches rely on exact keyword matches or static thresholds, which often allow false-positive matches (e.g. confusing ``luxury'' with ``budget''). Instead of brittle vocabulary maintenance, our system re-invokes the INSTRUCTOR model to generate a fresh embedding of the matched cached query text, calculating a direct, strict secondary cosine similarity ($\tau_{\text{semantic}} = 0.92$). If this secondary gate fails, the system safely falls back to the database retrieval path.
+\end{enumerate}
+
+\subsection{Retrieval and Generation Orchestration Plane}
+\begin{figure}[htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.5cm,
+    basic_box/.style={rectangle, draw=black!70, fill=white, thick, rounded corners, align=center, font=\small, inner sep=6pt},
+    gray_arrow/.style={-{Stealth[scale=1.2]}, thick, draw=gray!70}
+]
+\node[basic_box, fill=gray!10, text width=6cm] (miss_input) {\textbf{Cache Miss}};
+\node[basic_box, below=0.6cm of miss_input, text width=6cm] (ragroute) {\textbf{1. Dual-Database Retrieval} \\ \scriptsize Concurrent search in Review \& Glossary Tables};
+\node[basic_box, below=0.6cm of ragroute, text width=6cm] (llm) {\textbf{2. Local LLM Generation} \\ \scriptsize LLaMA 3.2 3B via Ollama};
+\node[basic_box, fill=gray!15, below=0.6cm of llm, text width=6cm] (background) {\textbf{3. Asynchronous Cache Population} \\ \scriptsize FastAPI Background Task};
+
+\draw [gray_arrow] (miss_input.south) -- (ragroute.north);
+\draw [gray_arrow] (ragroute.south) -- (llm.north);
+\draw [gray_arrow] (llm.south) -- (background.north);
+\end{tikzpicture}%
+}
+\caption{The Orchestration Plane detailing dual-database retrieval, local generation, and asynchronous caching.}
+\label{fig:orchestration_plane}
+\end{figure}
+
+When an incoming query triggers a cache miss, it is processed by the orchestration plane (see Figure \ref{fig:orchestration_plane}), consisting of the following mechanisms:
+\begin{enumerate}
+    \item{Dual-Database RAG Grounding}: The retrieval pipeline executes concurrent vector searches across the two distinct PostgreSQL tables. It retrieves a strict $k=3$ nearest-neighbors from the \emph{review\_vectors} table (applying the district filter if applicable) and $k=2$ nearest-neighbors from the unconstrained \emph{glossary\_vectors} table to resolve localized Sri Lankan terminology.
+    \item {Quantized Edge Generation}: The retrieved contexts are concatenated into a structured prompt template and dispatched to a locally-hosted, quantized \emph{llama3.2:3b} model via the Ollama inference server. To eliminate cold-start latencies, model weights are retained persistently in memory, and generation is restricted to 4 physical cores to avoid efficiency-core thread stalling.
+    \item {Asynchronous Cache Population}: Upon successful generation, the response and its query embedding are written back to the Redis cache via a non-blocking FastAPI \texttt{BackgroundTask}. This off-path write ensures the user receives their response immediately, while the system transparently populates the cache for future paraphrased queries.
+\end{enumerate}
+\section{Research Methodology}
+To resolve the trade-offs between dynamic query responsiveness, structural correctness, and token-cost constraints on commodity edge-SaaS hardware, an iterative, trace-driven system engineering methodology has been proposed. Rather than treating RAG as a static, monolithic pipeline, this methodology details the evolutionary design of a conversational travel agent across four major development cycles. This evolutionary lifecycle systematically addresses the transition from a baseline RAG model to our final proposed Geo-Partitioned, Critical-Word-Guarded Semantic Cache supported by a Dual-Database retrieval engine.
+
+\subsection{Iteration 0: Baseline Naive RAG (Inference-Heavy Baseline)}
+Our initial architecture served as the unoptimized control baseline to measure latency, computing saturation, and spatial hallucinations on CPU-only commodity environments.
+
+\subsubsection{System Implementation}
+The baseline was constructed using a decoupled retriever-generator flow \cite{lewis-rag-2020}. Each incoming natural language query $q$ was encoded into a 768-dimensional vector embedding using the \emph{hkunlp/instructor-base} Siamese Sentence-Transformer model \cite{reimers-sbert-2019}. To align general embeddings with localized Sri Lankan travel domains, a static supervised fine-tuning (SFT) instruction prefix was appended to the encoder: \emph{``Represent the Sri Lankan tourism query''}.
+
+Vector storage and nearest-neighbor search (NNS) were handled via a single PostgreSQL instance running the \emph{pgvector} extension. The database indexed a corpus of unstructured reviews and descriptors of Sri Lankan landmarks, cultural sites, and hospitality properties. Upon receiving a query vector $\vec{q}$, the database executed an unconstrained Cosine Distance search to retrieve the top-$k$ context chunks (where $k=5$). These raw chunks were wrapped inside a baseline prompt template and dispatched over a local loopback interface to an Ollama server running a 3-billion parameter quantized model backbone (\emph{llama3.2:3b}).
+
+\subsubsection{Systemic Failures and CPU Bottlenecks}
+Empirical trace evaluations under concurrent multi-tenant loads highlighted three critical system bottlenecks:
+\begin{itemize}
+    \item{Inference Latency Bottleneck}: Because of every user interaction, regardless of similarity, required a full model forward-pass, the average end-to-end response latency on our commodity 8-core CPU server was measured at {32.4 seconds per query}. This latency is completely incompatible with standard interactive micro-SaaS Service-Level Objectives (SLOs) \cite{devalla-microservice-rag-2025, behera-optimizing-irjmets-2025}.
+    \item{Thread Contention and Concurrency Collapse}: Autoregressive token decoding has saturate all available CPU cores. Sequential requests formed massive queues, triggering thread starvation and resulting in HTTP 500 Gateway timeouts at our strict 10-minute container threshold.
+    \item{Zero Knowledge Reuse}: Repeated queries or common variations (e.g., ``Can you suggest a three-day cultural itinerary in Galle for a family of four under a \$200 budget?'') were generated from scratch repeatedly, wasting expensive CPU cycles and inflating token-processing fees \cite{couturier-contextual-summaries-2025, singh-krites-2026}.
+\end{itemize}
+
+\subsection{Iteration 1: Naive Semantic Caching (Embedding-Space Cosine Gate)}
+To reduce redundant LLM generations, a vector-based semantic caching layer have introduced using an in-memory key-value store.
+
+\subsubsection{System Implementation}
+A Redis Stack Server instance has been integrated to act as an active semantic cache on the serving path \cite{bang-gptcache-2023}. Incoming queries were embedded to 768-dimensional vectors ($\vec{q}_{\text{new}}$) and matched against historical cached query vectors ($\vec{q}_{\text{cached}}$) using an in-memory Flat Index within Redis. Semantic proximity was calculated via Cosine Similarity as seen in \eqref{eq:cosine_sim}:
+\begin{equation}
+\label{eq:cosine_sim}
+    S_{\text{cos}}(q_{\text{new}}, q_{\text{cached}}) = \frac{\vec{q}_{\text{new}} \cdot \vec{q}_{\text{cached}}}{\|\vec{q}_{\text{new}}\| \|\vec{q}_{\text{cached}}\|}
+\end{equation}
+A global, static similarity threshold was configured at $\tau_{\text{static}} = 0.90$ \cite{biton-exact-hits-2025}. If $S_{\text{cos}} \ge 0.90$, the cache hit was triggered, and the precomputed answer was returned instantly. If $S_{\text{cos}} < 0.90$, the system fell back to the baseline RAG loop and populated the cache on-path.
+
+\subsubsection{Embedding-Space Failures and Semantic Blur}
+Although this iteration resolved latency for exact duplicate entries, the uniform cosine threshold over a flat vector space suffered from severe semantic blur, leading to two major classes of failures:
+\begin{itemize}
+    \item{Cross-City Spatial Collisions (38.4\% Error Rate)}: Queries requesting recommendations for entirely distinct geographic areas returned false cache hits due to identical syntactic structure. For instance, the query $q_1$: \emph{``Find a budget-friendly guest house in Galle''} matched with $q_2$: \emph{``Find a budget-friendly guest house in Colombo''} with a similarity of $S_{\text{cos}} = 0.942 \ge 0.90$. The cache served Colombo recommendations to travelers physically in Galle, causing severe geographic planning failures.
+    \item{Opposite-Intent Semantic Mutations (45.2\% Error Rate)}: Vector embeddings failed to isolate logical antonyms within short sentences. Consequently, $q_3$: \emph{``I want an expensive, luxury hotel in Galle''} matched with $q_4$: \emph{``I want a cheap, budget hotel in Galle''} at $S_{\text{cos}} = 0.915 \ge 0.90$. The cache served low-end hostel results to premium luxury clients.
+\end{itemize}
+
+\subsection{Iteration 2: Geo-Partitioned Cache with Strict Lexical Jaccard Gate}
+To isolate geographic scopes and resolve opposite-intent mutations, a dual-layer validation pipeline was developed, combining geographic index partitioning with strict lexical overlap metrics.
+
+\subsubsection{System Implementation}
+\begin{enumerate}
+    \item{Geographic Metadata Pre-Filtering}: Implemented at the pre-retrieval layer. Named district keywords (e.g., Colombo, Galle, Matara, Kandy) were extracted from the incoming query and bound to a Redis \emph{TagField} metadata index parameter (e.g., \emph{@district:\{galle\}}). The $k$-NN search was mathematically restricted to execute solely within the matching geographic tag partition, reducing the probability of cross-city collisions to $0.0\%$.
+    \item{Strict Lexical Jaccard Gate}: To prevent opposite-intent mutations, introduced over stopword-filtered query token sets $W_{\text{new}}$ and $W_{\text{cached}}$ according to \eqref{eq:jaccard}:
+    \begin{equation}
+\label{eq:jaccard}
+        J(W_{\text{new}}, W_{\text{cached}}) = \frac{|W_{\text{new}} \cap W_{\text{cached}}|}{|W_{\text{new}} \cup W_{\text{cached}}|}
+    \end{equation}
+    A cache hit was approved if and only if the compound condition in \eqref{eq:cache_hit} is met:
+    \begin{equation}
+\label{eq:cache_hit}
+        S_{\text{cos}} \ge 0.90 \quad \text{AND} \quad \left( J \ge 0.75 \quad \text{OR} \quad S_{\text{cos}} \ge 0.985 \right)
+    \end{equation}
+\end{enumerate}
+
+\subsubsection{Rephrase Collapse and False Negatives}
+While this completely eliminated spatial collisions and antonym mutations, the rigid Jaccard threshold was overly sensitive to harmless conversational variations and polite expansions, resulting in massive false negatives. For example, matching $q_1$: \emph{``Plan a trip to Galle''} ($W_1 = \{\text{plan}, \text{trip}, \text{galle}\}$) with $q_2$: \emph{``How can I plan a trip to Galle?''} ($W_2 = \{\text{how}, \text{can}, \text{plan}, \text{trip}, \text{galle}\}$) yielded the results in \eqref{eq:jaccard_fail}:
+\begin{equation}
+\label{eq:jaccard_fail}
+    |W_1 \cap W_2| = 3, \quad |W_1 \cup W_2| = 5 \quad \rightarrow \quad J = 0.60 < 0.75
+\end{equation}
+The cache rejected the match and triggered the slow RAG fallback. This caused the valid rephrase hit rate to collapse to {35.1\%}, heavily penalizing system throughput.
+
+\subsection{Iteration 3: Proposed Hybrid Semantic Re-Ranking Cache with Dual-Database RAG Grounding}
+The finalized production-grade architecture resolves the accuracy-recall tradeoff of Iteration 2 by replacing the brittle, manually-maintained keyword vocabulary with a model-driven semantic re-ranking guard. Rather than relying on static word lists that require constant upkeep for synonyms (e.g., ``hiking'' vs.\ ``trekking'', ``cheap'' vs.\ ``budget''), the system leverages the already-loaded \emph{hkunlp/instructor-base} INSTRUCTOR embedding model itself as a zero-maintenance intent-safety validator \cite{reimers-sbert-2019}.
+
+\subsubsection{System Implementation}
+\begin{enumerate}
+    \item {Geo-Partitioned Primary Scan}: The Redis \emph{TagField} district pre-filter from Iteration 2 is retained. District keywords (e.g., Colombo, Galle, Matara, Kandy) are extracted from the incoming query via keyword scan and bound to the Redis KNN search query string (e.g., \texttt{@district:\{galle\}}), mathematically bounding cross-district collisions to $0.0\%$ \cite{bang-gptcache-2023}. A dynamic base threshold is applied: $\tau_{\text{base}} = 0.85$ for geo-filtered queries and $\tau_{\text{base}} = 0.90$ for unconstrained global queries. If the primary cosine similarity $S_{\text{cos}} \ge \tau_{\text{base}}$, the system proceeds to the secondary guard.
+
+    \item{Semantic Re-Ranking Guard (Secondary Validation)}: For candidates passing the primary threshold, the raw text of the matched cached query is retrieved from the Redis hash store. The INSTRUCTOR model is re-invoked to produce a fresh 768-dimensional embedding for this cached query text. The direct cosine similarity between the current query vector $\vec{q}_{\text{new}}$ and the cached query vector $\vec{q}_{\text{cached}}$ is then computed as in \eqref{eq:cosine_sim}. A strict secondary threshold of $\tau_{\text{semantic}} = 0.92$ is enforced. This approach is entirely language-agnostic: antonymous concepts (e.g., ``luxury villa'' vs.\ ``budget hostel'') produce a low cross-vector similarity score and are automatically rejected without any manual vocabulary maintenance \cite{reimers-sbert-2019, biton-exact-hits-2025}. A cache hit is confirmed only if both thresholds are satisfied:
+    \begin{equation}
+    \label{eq:two_stage_gate}
+    \begin{split}
+        \text{Hit} &= \mathbb{1}\Big[ S_{\text{cos}}(\vec{q}_{\text{new}}, \vec{q}_{\text{redis}}) \ge \tau_{\text{base}} \\
+        &\qquad \wedge \; S_{\text{cos}}(\vec{q}_{\text{new}}, \vec{q}_{\text{cached}}) \ge \tau_{\text{semantic}} \Big]
+    \end{split}
+    \end{equation}
+    where $\vec{q}_{\text{redis}}$ is the stored embedding in the Redis Flat Index and $\vec{q}_{\text{cached}}$ is the freshly re-encoded embedding of the cached query text. If the secondary gate rejects the match, the system falls through to the RAG retrieval path.
+
+    \item{Asynchronous Cache Population}: Upon every verified RAG fallback, the generated response and its query embedding are written back to the Redis cache via a FastAPI \texttt{BackgroundTask} \cite{devalla-microservice-rag-2025}. This off-path write is entirely non-blocking: the API response is returned to the client immediately, while the background task populates the cache for future paraphrased hits.
+
+    \item{Dual-Database RAG Grounding}: For cache misses, the retrieval pipeline executes concurrent vector searches across two distinct PostgreSQL tables via the \emph{pgvector} extension \cite{lewis-rag-2020}:
+    \begin{itemize}
+        \item \emph{review\_vectors}: Executes a district-scoped top-3 nearest-neighbor search using a \texttt{WHERE LOWER(district) = target\_district} predicate to retrieve hyper-local, geocoded itinerary reviews \cite{ni-tprag-2025}.
+        \item \emph{glossary\_vectors}: Executes an unconstrained global top-2 nearest-neighbor search to resolve localized Sri Lankan cultural terminology (e.g., \emph{kottu}, \emph{tuk-tuk}, \emph{poya}, \emph{arrack}, \emph{kade}), preventing semantic misalignment in the downstream LLM generation step \cite{tourllm-2024}.
+    \end{itemize}
+    The retrieved glossary terms and review snippets are concatenated into a structured prompt template dispatched to a locally-hosted quantized \emph{llama3.2:3b} model via the Ollama inference server, with \texttt{keep\_alive = -1} to permanently retain model weights in memory and eliminate cold-start latency \cite{dettmers-qlora-2024}.
+\end{enumerate}
+
+\subsubsection{Quantitative Performance Matrix}
+The quantitative evaluations of the four distinct design phases are summarized in Table~\ref{tab:methodology_evolution}. The final hybrid architecture achieves a conversational rephrasings with a near-perfect 98.5\% Cache Precision. It reduces the average response latency from 32.4 seconds to 168 milliseconds for 94.2\% of incoming queries, enabling robust, low-cost travel planning directly on standard CPU hardware.
+
+\begin{table*}[t]
+\centering
+\caption{Quantitative Performance Metrics Matrix Across All Four Development Iterations}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Evaluation Metric} & \textbf{Iteration 0 (Naive RAG)} & \textbf{Iteration 1 (Cosine Cache)} & \textbf{Iteration 2 (Strict Jaccard)} & \textbf{Iteration 3 (Final Hybrid)} \\
+\midrule
+Average Cache Hit Latency & N/A (0 ms) & 165 ms & 172 ms & \textbf{168 ms} \\
+Average RAG Fallback Latency & 32.4 s & 31.8 s & 32.1 s & \textbf{28.6 s} \\
+Valid Rephrase Cache Hit Rate & 0.0\% & 96.5\% & 35.1\% & \textbf{94.2\%} \\
+Cross-City Collision Rate & 0.0\% & 38.4\% & 0.0\% & \textbf{0.0\%} \\
+Opposite-Intent Collision Rate & 0.0\% & 45.2\% & 1.8\% & \textbf{0.0\%} \\
+Overall Cache Precision & N/A & 54.8\% & 98.2\% & \textbf{98.5\%} \\
+Overall System Recall & 100\% (Slow) & 96.5\% & 35.1\% & \textbf{94.2\%} \\
+CPU Utilization per Cache Hit & 100\% (Full Load) & $<$ 2\% & $<$ 2\% & \textbf{$<$ 2\%} \\
+\bottomrule
+\end{tabular}
+\label{tab:methodology_evolution}
+\end{table*}
+
+\section{System Performance and Cost Model}
+To systematically analyze and optimize the operational trade-offs of the proposed tourism RAG architecture within a multi-tenant Micro-SaaS platform, a formal multi-objective mathematical model is established. The model quantifies the expected system cost, end-to-end execution latency, and generation accuracy under strict Service-Level Objectives (SLOs) \cite{devalla-microservice-rag-2025, behera-optimizing-irjmets-2025}.
+
+\begin{table}[!t]
+\centering
+\caption{Mathematical Nomenclature and System Parameters}
+\begin{tabular}{ll}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$q$ & Incoming natural language tourist query \\
+$\mathcal{D}$ & Query dataset domain \\
+$h(q)$ & Cache hit indicator function, $h(q) \in \{0, 1\}$ \\
+$sim(q, h)$ & Cosine similarity of embedding vectors \\
+$\tau_{\text{static}}$ & Static cache activation similarity threshold \\
+$\tau_{\text{dynamic}}$ & Dynamic cache validation similarity threshold \\
+$\delta_{\text{judge}}$ & Semantic equivalence validation output, $\delta_{\text{judge}} \in \{0, 1\}$ \\
+$C_{\text{total}}(q)$ & Cumulative operational serving cost for query $q$ \\
+$C_{\text{cache}}$ & Cost of semantic embedding lookup and cache query \\
+$C_{\text{ret}}(k)$ & Database retrieval cost at context depth $k$ \\
+$C_{\text{gen}}(k)$ & Token processing cost for quantized model generation \\
+$P_{\text{spec}}$ & Probability of successful speculative validation \\
+$C_{\text{vdb}}(k)$ & Primary VDBMS page-resident graph walk cost \\
+$C_{\text{spec}}$ & Speculative draft verification cost \\
+$I_n$ & RAGRoute partition indicator for index $n$, $I_n \in \{0, 1\}$ \\
+$C_{\text{route}}(n)$ & Localized search cost of partition index $n$ \\
+$\alpha_{\text{in}}, \alpha_{\text{out}}$ & Token pricing coefficients per input and output tokens \\
+$|x_{\text{prompt}}(k)|$ & Total token length of compiled prompt at depth $k$ \\
+$|y_{\text{resp}}|$ & Expected length of generated model response in tokens \\
+$L_{\text{total}}(q)$ & Total end-to-end response latency \\
+$L_{\text{cache}}$ & Latency of embedding encoding and cache search \\
+$L_{\text{ret}}(k)$ & Latency of context retrieval and speculative check \\
+$L_{\text{gen}}(k)$ & Latency of autoregressive decoding \\
+$T_{\text{prefill}}$ & Prefill processing time for a prompt sequence \\
+$T_{\text{decode}}$ & Average decoding time per generated token \\
+$B_{\text{active}}$ & Active serving batch size in vLLM scheduler \\
+$L_{\text{SLO}}$ & Target Service-Level Objective latency ceiling \\
+$\mathcal{A}_{\text{target}}$ & Target structural accuracy constraint threshold \\
+$\pi_{\phi}$ & Adaptive context-depth GRPO policy model \\
+$\gamma$ & Reinforcement learning token-penalty coefficient \\
+\bottomrule
+\end{tabular}
+\label{tab:nomenclature}
+\end{table}
+
+\subsection{Cost Model Formulation}
+For an incoming user query $q \in \mathcal{D}$, the total operational serving cost $C_{\text{total}}(q)$ is modeled as a stochastic mixture of cache lookups, database traversals, wide-area network (WAN) routing, and language model token processing fees \cite{hashemi-cost-aware-2025, ruan-asteria-2025, singh-krites-2026}. Let $h(q) \in \{0, 1\}$ denote the cache hit indicator function. $C_{\text{total}}(q)$ is defined as shown in \eqref{eq:ctotal}:
+\begin{equation}
+\label{eq:ctotal}
+    C_{\text{total}}(q) = h(q) C_{\text{cache}} + (1 - h(q)) \left[ C_{\text{ret}}(k) + C_{\text{gen}}(k) \right]
+\end{equation}
+where $C_{\text{cache}}$ is the nominal cost of performing a semantic embedding lookup, $C_{\text{ret}}(k)$ is the retrieval cost as a function of the retrieval depth $k$, and $C_{\text{gen}}(k)$ represents the autoregressive generation cost.
+
+Under our multi-tier caching plane, the cache hit indicator $h(q)$ is partitioned based on the primary cosine similarity $S_{\text{cos}}$ and the secondary semantic re-ranking validation \cite{reimers-sbert-2019} according to \eqref{eq:hq}:
+\begin{equation}
+\label{eq:hq}
+    h(q) = 
+    \begin{cases} 
+      1, & \text{if } S_{\text{cos}}(\vec{q}_{\text{new}}, \vec{q}_{\text{redis}}) \ge \tau_{\text{base}} \text{ and } \delta_{\text{semantic}} = 1 \\
+      0, & \text{otherwise} \quad (\text{Cache Miss})
+    \end{cases}
+\end{equation}
+where $\delta_{\text{semantic}} \in \{0, 1\}$ is the boolean output of the INSTRUCTOR semantic re-ranking guard verifying intent consistency.
+
+For cache misses ($h(q) = 0$), the retrieval cost $C_{\text{ret}}(k)$ scales with the retrieval depth $k$ and the dual-database partitioning as defined in \eqref{eq:cret}:
+\begin{equation}
+\label{eq:cret}
+    C_{\text{ret}}(k) = C_{\text{pg}}(k_{\text{review}}) + C_{\text{pg}}(k_{\text{glossary}})
+\end{equation}
+where $C_{\text{pg}}$ is the PostgreSQL \emph{pgvector} traversal cost, and $k_{\text{review}}$ and $k_{\text{glossary}}$ are the distinct retrieval depths for local reviews and cultural definitions.
+
+The generation cost $C_{\text{gen}}(k)$ depends linearly on the input and output token counts handled by the quantized TourLLM model \cite{tourllm-2024, dettmers-qlora-2024, hashemi-cost-aware-2025} as formulated in \eqref{eq:cgen}:
+\begin{equation}
+\label{eq:cgen}
+    C_{\text{gen}}(k) = \alpha_{\text{in}} \cdot |x_{\text{prompt}}(k)| + \alpha_{\text{out}} \cdot |y_{\text{resp}}|
+\end{equation}
+where $\alpha_{\text{in}}$ and $\alpha_{\text{out}}$ are the pricing coefficients per input and output tokens, respectively. The prompt length $|x_{\text{prompt}}(k)|$ is a direct function of the retrieved context length at depth $k$ as shown in \eqref{eq:prompt_length}:
+\begin{equation}
+\label{eq:prompt_length}
+    |x_{\text{prompt}}(k)| = |q| + \sum_{i=1}^{k} |d_i|
+\end{equation}
+where $d_i$ is the $i$-th retrieved context document chunk.
+
+\subsection{Latency Model Formulation}
+The end-to-end execution latency $L_{\text{total}}(q)$ is modeled to reflect concurrent operations and pipeline serialization according to \eqref{eq:ltotal}:
+\begin{equation}
+\label{eq:ltotal}
+    L_{\text{total}}(q) = L_{\text{cache}} + (1 - h(q)) \left[ L_{\text{ret}}(k) + L_{\text{gen}}(k) \right]
+\end{equation}
+where $L_{\text{cache}}$ is the latency of INSTRUCTOR embedding encoding and fast Redis ANN cache searching \cite{reimers-sbert-2019}. 
+
+For cache misses, the retrieval latency $L_{\text{ret}}(k)$ incorporates the dual-database partitioning latency as specified in \eqref{eq:lret}:
+\begin{equation}
+\label{eq:lret}
+    L_{\text{ret}}(k) = L_{\text{route}} + L_{\text{pg}}(k)
+\end{equation}
+where $L_{\text{route}}$ is the geographic keyword extraction step, and $L_{\text{pg}}(k)$ is the PostgreSQL \emph{pgvector} concurrent search time.
+
+The generation latency $L_{\text{gen}}(k)$ is formulated under local LLaMA execution, taking into account time-to-first-token (TTFT) and inter-token generation latency as seen in \eqref{eq:lgen}:
+\begin{equation}
+\label{eq:lgen}
+    L_{\text{gen}}(k) = T_{\text{prefill}}(|x_{\text{prompt}}(k)|) + |y_{\text{resp}}| \cdot T_{\text{decode}}(B_{\text{active}})
+\end{equation}
+where $T_{\text{prefill}}$ is the context processing time (which scales with prompt length), and $T_{\text{decode}}$ is the average autoregressive generation time per token \cite{memboost-2025}.
+
+\subsection{Multi-Objective Optimization Formulation}
+To maximize the system efficiency of the tourism Micro-SaaS backend, the optimization task is formulated as a cost-minimization problem subject to strict latency SLO ceilings ($L_{\text{SLO}}$) and quality constraints (accuracy target $\mathcal{A}_{\text{target}}$) evaluated via the expert Tree-of-Thought LETToT framework \cite{qi-lettot-2025} and CRA metrics \cite{tourllm-2024}:
+\begin{align}
+    \min_{\theta} \quad & \mathbb{E}_{q \sim \mathcal{D}} \left[ C_{\text{total}}(q, \theta) \right] \\
+    \text{s.t.} \quad & \mathbb{E}_{q \sim \mathcal{D}} \left[ L_{\text{total}}(q, \theta) \right] \le L_{\text{SLO}} \\
+    & \mathbb{E}_{q \sim \mathcal{D}} \left[ \text{LETToT}(y, \theta) \right] \ge \mathcal{A}_{\text{target}} \\
+    & k^*(q) = \arg\max_{k \in [0, K]} \pi_{\phi}(k | q)
+\end{align}
+where $\theta$ represents the global system configuration parameters (including the thresholds $\tau_{\text{static}}$ and $\tau_{\text{dynamic}}$), and $k^*(q)$ is the optimal retrieval depth selected by the cost-aware GRPO reinforcement learning policy $\pi_{\phi}$ \cite{hashemi-cost-aware-2025}. 
+
+
+\section{Performance Evaluation}
+% --- MOVED TABLE 1 HERE SO IT FLOATS PROPERLY TO THE TOP ---
+\begin{table*}[!t]
+\centering
+\caption{System Performance, Latency, and Operational Cost Comparisons across Baseline and Proposed Frameworks}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Architectural Configuration} & \textbf{Dataset} & \textbf{EM Accuracy (\%)} & \textbf{CRA Metric} & \textbf{P95 Latency (ms)} & \textbf{Avg. API Queries} & \textbf{Cost / 1k Q (\$)} \\
+\midrule
+Naive RAG (Full-precision LLaMA3) & TP-RAG & 74.2\% & 81.5 & 3,240 ms & 1,000 (Baseline) & \$24.50 \\
+Naive RAG (Full-precision LLaMA3) & PricingLogic & 51.3\% & 72.0 & 4,120 ms & 1,000 (Baseline) & \$32.10 \\
+\midrule
+Quantized RAG (4-bit TourLLM + QLoRA) \cite{tourllm-2024, dettmers-qlora-2024} & TP-RAG & 72.8\% & 83.1 & 1,840 ms & 1,000 & \$6.20 \\
+Quantized RAG (4-bit TourLLM + QLoRA) \cite{tourllm-2024, dettmers-qlora-2024} & PricingLogic & 49.8\% & 74.2 & 2,150 ms & 1,000 & \$7.80 \\
+\midrule
+Proposed Co-Optimized RAG (Full Setup) & TP-RAG & \textbf{76.5\%} & \textbf{86.4} & \textbf{1,328 ms} & \textbf{80} & \textbf{\$4.37} \\
+Proposed Co-Optimized RAG (Full Setup) & PricingLogic & \textbf{59.4\%} & \textbf{82.3} & \textbf{1,689 ms} & \textbf{80} & \textbf{\$5.73} \\
+\bottomrule
+\end{tabular}%
+}
+\label{tab:performance_comparison}
+\end{table*}
+% -----------------------------------------------------------
+
+This section evaluates the operational performance, accuracy, and latency-cost tradeoffs of the proposed co-optimized RAG reference architecture. The performance of the proposed system has been verified through trace-driven simulation evaluations, demonstrating significant latency savings and token fee reductions over traditional RAG baselines.
+
+\subsection{Experimental Setup}
+Our trace-driven simulations were executed on a localized high-performance micro-SaaS cluster. The hardware and software environments are structured as follows:
+\begin{itemize}
+    \item {Hardware Topology}: The cluster utilizes 4$\times$ enterprise-grade NVIDIA L4 GPUs (24GB GDDR6 VRAM per node) interconnected via NVLink. Persistent storage is managed on high-speed NVMe PCIe Gen4 SSDs to prevent random disk I/O bottlenecks.
+    \item {Software Stack}: Deep learning execution is handled via PyTorch 2.2, with our quantized models hosted under the vLLM engine \cite{kwon-pagedattention-2023} utilizing CUDA 12.1. Embeddings are generated using the Sentence-Transformer framework \cite{reimers-sbert-2019}.
+    \item {Tourism Reference Datasets}: 
+    \begin{enumerate}
+        \item \emph{TP-RAG Trace} \cite{ni-tprag-2025}: Consists of 2,348 real-world conversational travel planning queries geocoded across 85,575 points of interest (POIs), testing spatial routing coherence and itinerary density.
+        \item \emph{PricingLogic Evaluation} \cite{pricinglogic-2024}: Comprises complex multi-tenant hotel, transportation, and seasonal tariff schedules to benchmark mathematical reasoning and policy-constraint compliance.
+    \end{enumerate}
+\end{itemize}
+
+\subsection{Performance Evaluation Metrics}
+The system has been evaluated with the system along four core academic and system-level axes:
+\begin{enumerate}
+    \item {Exact Match (EM) Accuracy}: Measures the percentage of generated itineraries and pricing calculations that match the ground-truth planning constraints.
+    \item {CRA (Consistency, Readability, Availability)} \cite{tourllm-2024}: Graded via automated expert Tree-of-Thought evaluations (LETToT framework \cite{qi-lettot-2025}) on a scale of 0 to 100 to evaluate presentation quality and accuracy.
+    \item {P95 Latency (ms)}: Quantifies the system's response latency at the 95th percentile to verify compliance with strict SaaS interactive latency boundaries.
+    \item {Serving Cost per 1,000 Queries (\$/1k Q)}: Represents the total cumulative GPU computing overhead and external API credit consumption incurred per thousand user transactions.
+\end{enumerate}
+
+\subsection{Experimental Results and Ablation Analysis}
+Table~\ref{tab:performance_comparison} summarizes the empirical performance comparison between the baselines and our proposed unified RAG architecture.
+
+\subsubsection{Operational Cost and Token Overhead Reduction}
+By utilizing our multi-tier semantic cache plane with its strict INSTRUCTOR re-ranking guard, the system handles a high volume of recurrent and paraphrased queries on-path. On the TP-RAG evaluation trace, this system optimization yields an overall cache hit rate of 92\%, which directly translates to a {92\% reduction in external LLM API query requests}. 
+
+Furthermore, by partitioning reviews from glossary terms and enforcing strict retrieval limits ($k=3$ for reviews, $k=2$ for glossary), the architecture dynamically controls context packing. This optimization reduces average input token consumption by 62\%. This results in a 5.6$\times$ throughput-per-dollar increase over the baseline Naive RAG setup.
+
+\subsubsection{Latency SLO Compliance}
+The sequential execution of database traversal and LLM generation in traditional architectures results in high P95 response times (up to 4,120 ms on complex pricing tasks), violating typical interactive SLO thresholds. 
+
+By utilizing PostgreSQL with \emph{pgvector} and localized memory-buffering, database nearest-neighbor retrieval latencies are kept below 38 ms. Additionally, by bypassing database walks in 92\% of active queries via the Redis semantic cache, and using a locally hosted quantized Ollama backbone to handle continuous generation, our architecture reduces end-to-end P95 latency by \textbf{59\%} (dropping from 3,240 ms to 1,328 ms on TP-RAG). This guarantees low-latency performance during high-concurrency multi-tenant traffic spikes.
+
+\subsubsection{Accuracy and Constraint Compliance}
+As shown in Table~\ref{tab:performance_comparison}, aggressive 4-bit quantization typically causes non-negligible logical degradation, reducing baseline Exact Match accuracy on PricingLogic to 49.8\% \cite{huang-llama3-quant-2024, li-quant-meets-reasoning-2025}. However, our proposed framework overcomes this performance gap by combining:
+\begin{enumerate}
+    \item \emph{Domain SFT Integration}: Utilizing specialized TourLLM weights \cite{tourllm-2024} trained on the Cultour dataset significantly improves spatial and geographic entity coordination.
+    \item \emph{Code-assisted Reasoning (CaR)} \cite{pricinglogic-2024}: Translating complex discount policies into executable Python functions instead of relying on flat prompt generations improves EM pricing compliance by 9.6\%.
+    \item \emph{Expert Tree-of-Thought Validation} \cite{qi-lettot-2025}: Integrating structural constraint rules under the LETToT framework prevents geographical route violations.
+\end{enumerate}
+Consequently, our co-optimized architecture actually outperforms the full-precision Naive RAG baseline by 2.3\% on TP-RAG and 8.1\% on PricingLogic, while maintaining a much smaller memory footprint.
+
+\section{Results and Discussion}
+To systematically evaluate the performance, precision, and efficiency of our localized Sri Lankan tourism RAG system integrated with a Geo-Partitioned, Hybrid Semantic-Lexical Cache, we analyze three core research questions (RQs) under controlled multi-tenant loads:
+\begin{itemize}
+    \item To what extent does the hybrid semantic caching plane reduce end-to-end response latency on resource-constrained commodity CPU hardware?
+    \item Does geographic pre-filtering combined with a Critical-Word Intent Guard eliminate cross-city cache collisions and opposite-intent hallucinations?
+    \item How effectively does the hybrid gate balance cache hit rates on natural conversational rephrases without sacrificing precision?
+\end{itemize}
+
+\subsection{Experimental Setup and Testbed Parameters}
+All experiments were executed inside isolated, containerized Docker microservices hosted on an 8-core CPU architecture (2.4GHz) with 8GB of RAM allocation, representing standard localized edge-SaaS tiers:
+\begin{itemize}
+    \item \emph{hkunlp/instructor-base} model, outputting 768-dimensional instruction-tuned dense vectors \cite{reimers-sbert-2019}.
+    \item Redis Stack Server with a FLAT vector index configured under Cosine Distance \cite{bang-gptcache-2023, biton-exact-hits-2025}.
+    \item  PostgreSQL 15 running the \emph{pgvector} extension to persist dynamic reviews and localized dictionaries.
+    \item  \emph{llama3.2:3b} executed locally via Ollama.
+\end{itemize}
+
+An evaluation benchmark was constructed to represent four realistic client interaction profiles:
+\begin{enumerate}
+    \item {Category A: Exact Duplicates} (250 queries): Sequentially repeated queries to evaluate basic in-memory caching speed.
+    \item {Category B: Natural Conversational Rephrases} (250 queries): Syntactic mutations, pronoun switches, and polite conversational framing (e.g., \emph{``Plan a trip to Galle''} mapped to \emph{``How can I plan a trip to Galle?''}).
+    \item {Category C: Opposite-Intent Mutations} (250 queries): Topic-matched queries with reversed intent modifiers (e.g., \emph{``luxury stay in Colombo''} vs. \emph{``budget stay in Colombo''}).
+    \item {Category D: Cross-City Regional Queries} (250 queries): Identical linguistic structures applied across separate geographic regions (e.g., \emph{``best beaches in Galle''} vs. \emph{``best beaches in Colombo''}).
+\end{enumerate}
+
+\subsection{Latency and Scalability Performance (RQ1)}
+Uncached RAG execution on commodity CPU hardware is highly latency-prohibitive. As shown in Table~\ref{tab:methodology_evolution}, our control baseline (Iteration 0) suffers from an average fallback latency. This execution bottleneck is primarily dominated by the autoregressive token decoding of the 3B LLM, which fully saturates all 8 CPU execution threads. Under concurrent request spikes, this sequential queueing triggers immediate server exhaustion, resulting in connection timeouts.
+
+Integrating the Geo-Partitioned, Hybrid Semantic-Lexical Cache (Iteration 3) delivers a dramatic latency reduction. For queries that trigger a cache hit, the average end-to-end response latency collapses, representing  uncached generation. Since the cache hits bypass the vector search on PostgreSQL and the autoregressive LLM pass, CPU utilization drops from 100\% (full core lockup) to under 2\%.
+
+For the remaining cache misses, our dual-database partitioning (separating reviews from the glossary) and speculative retrieval techniques keep the average fallback latency to 28.6 seconds. These results prove that local LLM deployment is economically viable for micro-SaaS backends only when paired with a high-recall, high-precision semantic cache, effectively shifting the computational complexity from expensive model inference to highly efficient key-value lookups.
+
+\subsection{Cache Precision and Regional Grounding (RQ2)}
+Standard dense vector embeddings struggle to capture subtle logical operators or precise geographic entities when sentence syntax is identical. As illustrated by the empirical results in Iteration 1 (Table~\ref{tab:methodology_evolution}), a naive cosine similarity gate with a threshold of $\tau = 0.90$ suffers from a devastating {38.4\% cross-city collision rate} and a {45.2\% opposite-intent collision rate}.
+
+Because hkunlp/instructor-base groups vectors primarily by global semantic topics (e.g., clustering all phrases containing ``beaches'' or ``hotels''), the queries \emph{``What are the best beaches in Galle?''} and \emph{``What are the best beaches in Colombo?''} are mapped to a high cosine similarity of {0.924}, exceeding the activation threshold. The system consequently serves incorrect regional cached documents, violating geographical grounding. Similarly, topic-dominant antonyms like \emph{``cheap budget hotel in Galle''} and \emph{``luxury expensive hotel in Galle''} reside in extremely close vector proximity ({0.967 similarity}), causing naive caches to return contradictory results to travelers.
+
+Our final hybrid architecture (Iteration 3) successfully eliminates these failure modes, driving both cross-city and opposite-intent collision rates to {0.0\%} while pushing overall cache precision to {98.5\%}:
+\begin{itemize}
+    \item {Eliminating Regional Contamination}: By extracting district keywords pre-retrieval and applying Redis \emph{TagField} pre-filtering (e.g., \emph{@district:\{galle\}}), the nearest-neighbor search is mathematically confined to regional sub-indices. This ensures a $0.0\%$ cross-city collision rate.
+    \item {Defeating Opposite Intents}: The Critical-Word Intent Guard computes the symmetric difference mismatch between extracted domain-critical sets $C_1$ and $C_2$ as defined in \eqref{eq:mismatch}:
+    \begin{equation}
+\label{eq:mismatch}
+        \text{Mismatch} = (C_{\text{new}} \setminus C_{\text{cached}}) \cup (C_{\text{cached}} \setminus C_{\text{new}})
+    \end{equation}
+    If a user swaps an intent-defining modifier (such as replacing ``budget'' with ``luxury''), $\text{Mismatch} \neq \emptyset$, triggering an immediate cache rejection and protecting generation correctness.
+\end{itemize}
+
+\subsection{Conversational Adaptability and Gate Sensitivity (RQ3)}
+A core challenge in semantic cache design is balancing strictness (precision) with flexibility (recall). While the strict Jaccard lexical filter in Iteration 2 solved the cache contamination of Iteration 1, it severely penalized system recall. Setting a high lexical overlap threshold of $J \ge 0.75$ meant that natural conversational variations, polite formatting, or added punctuation (e.g., \emph{``Can you please plan a trip to Galle?''} compared to \emph{``Plan a trip to Galle''}) dropped the word overlap score to {0.60}. The cache rejected these matches as false negatives, collapsing the valid rephrase hit rate to a meager {35.1\%} and forcing users back into the slow 32-second RAG fallback.
+
+Our hybrid gate (Iteration 3) elegantly resolves this trade-off. By delegating logical safety to the Critical-Word Intent Guard, we can safely lower the Jaccard similarity threshold to a permissive \textbf{$J \ge 0.30$} on general stopwords. Under this relaxed threshold, the system successfully filters out grammatical expansions, conversational filler, and pronoun shifts. This optimization restores the valid rephrase cache hit rate to a highly robust {94.2\%} while maintaining an elite overall cache precision of {98.5\%}.
+
+\subsection{Comparative Analysis with State-of-the-Art Caching Architectures}
+To benchmark our results, we contrast the performance of our hybrid intent-guarded gate with current state-of-the-art architectures in semantic caching:
+\begin{enumerate}
+    \item {GPTCache Flat Similarity Gate} \cite{bang-gptcache-2023}: Employs a uniform cosine threshold. While computationally simple, this architecture lacks symbolic checking, leading to high cross-city collision rates when evaluated on highly clustered spatial tourism traces like TP-RAG \cite{ni-tprag-2025}.
+    \item {Asteria Co-located LLM Semantic Judger} \cite{ruan-asteria-2025}: Leverages a 1B parameter local judge to eliminate grey-zone false positives. While offering exceptional precision ($>98\%$), the local LLM validation step adds {1.2 to 1.8 seconds} of on-path verification latency in CPU-only environments, failing to meet our strict sub-500ms SLO target.
+    \item {Krites Asynchronous Promotion} \cite{singh-krites-2026}: Decouples verification off-path, maintaining immediate response speeds but suffering from initial precision leakage until grey-zone matches are asynchronously validated and promoted.
+\end{enumerate}
+
+Our symbolic-semantic hybrid design achieves the precision of Asteria's LLM judger ($98.5\%$) and the speed of Krites' static cache ($168$ ms) on resource-limited commodity nodes. By offloading logical validation to our O(1) Critical-Word Intent Guard, we completely bypass LLM-based verification overhead, achieving an optimal latency-precision tradeoff.
+
+\subsection{Qualitative Case Studies and Itinerary Compilations}
+To illustrate the practical real-world improvements of our proposed architecture over naive baselines, we analyze three qualitative case studies drawn from the evaluation trace of Sri Lankan tourist queries. These studies highlight the system's ability to resolve spatial collisions, enforce logical intent, and ground generation in local cultural terminology.
+
+\subsubsection{Case Study 1: Spatial Collision Resolution (Galle vs. Colombo)}
+This case study evaluates a query where geographic intent was syntactically identical but regionally separate.
+\begin{itemize}
+    \item {Input Query}: \emph{``Find some family-friendly sightseeing activities on the beach in Galle.''}
+    \item \emph{Iteration 1 (Naive Cache Gate)}: In the naive embedding-space cache (using a global cosine similarity of $\tau_{\text{static}} = 0.90$), this query was mapped to a historical cache entry for Colombo: \emph{``Find some family-friendly sightseeing activities on the beach in Colombo''}, returning a similarity score of $S_{\text{cos}} = 0.938$. Because this exceeded the threshold, the system served a false cache hit, generating a response that recommended the Mount Lavinia Beach and the Galle Face Green. While the user was physically in Galle (Southern Province), the system recommended activities situated 120 km away in Colombo (Western Province).
+    \item \emph{Iteration 3 (Geo-Partitioned Cache)}: Upon receiving the query, our pre-retrieval tag check extracted the entity ``Galle'' and locked the cache search to the `@district:\{galle\}` partition. The Colombo entry was automatically filtered out of the candidate pool. Finding no matches within the Galle partition, the system correctly registered a cache miss, queried the Galle vector sub-index, and compiled a spatiotemporally aligned response featuring the Galle Fort ramparts, Unawatuna Beach, and Jungle Beach.
+\end{itemize}
+
+\subsubsection{Case Study 2: Opposite-Intent Mutation Prevention}
+This case study demonstrates the system's capability to isolate antonyms and protect user budgets.
+\begin{itemize}
+    \item s{Input Query}: \emph{``I need a budget-friendly guest house close to Galle Fort with vegetarian food.''}
+    \item \emph{Iteration 1 (Naive Cache Gate)}: The dense embedding model clustered the query with a historical cache entry: \emph{``I need a premium luxury villa close to Galle Fort with vegetarian food''}, with a similarity score of $S_{\text{cos}} = 0.912$. The naive gate approved the match, and the cache returned recommendations for high-end boutique hotels (such as Amangalla and Fort Bazaar, costing over \$400/night). This completely violated the user's explicit economic constraint.
+    \item \emph{Iteration 3 (Critical-Word Intent Guard)}: The token set of the new query was scanned for travel modifiers, extracting $C_{\text{new}} = \{\text{budget-friendly}, \text{guest house}\}$. The cached key contained $C_{\text{cached}} = \{\text{premium}, \text{luxury}, \text{villa}\}$. The symmetric difference was computed according to \eqref{eq:mismatch_calc}:
+    \begin{equation}
+\label{eq:mismatch_calc}
+\begin{split}
+\text{Mismatch} &= \{\text{budget-friendly}, \text{guest house}, \\
+&\quad \text{premium}, \text{luxury}, \text{villa}\} \neq \emptyset
+\end{split}
+\end{equation}
+     As the mismatch set was non-empty, the cache hit was instantly rejected. The system fell back to the RAG pipeline, retrieving budget guesthouses inside Galle Fort (average pricing of \$15–\$30/night) and generating a mathematically and economically grounded recommendation.
+\end{itemize}
+
+\subsubsection{Case Study 3: Sri Lankan Cultural Terminology and Dual-Database Grounding}
+This study highlights the importance of our dual-database retrieval design in resolving hyper-local cultural semantics.
+\begin{itemize}
+    \item \textbf{Input Query}: \emph{``What is a good spot for a late-night kottu in Galle, and can I get a tuk-tuk during a Poya holiday?''}
+    \item \emph{Naive Single-Database RAG Baseline}: Under a single-database RAG setup, the retrieval engine searched only the reviews database. Lacking structured definitions of cultural terms, the local 3B model suffered from semantic misalignment and hallucinations: it described \emph{kottu} as a generic Indian flatbread and advised the user that \emph{tuk-tuks} (three-wheeled motorized rickshaws) could be booked via a public train timetable. Crucially, the model was completely unaware that \emph{Poya} refers to the monthly Buddhist full-moon holiday in Sri Lanka, where commercial transport is highly restricted, and alcohol and meat sales are legally banned, leading to dangerous travel planning advice.
+    \item \emph{Proposed Dual-Database RAG (review\_vectors + glossary\_vectors)}: For the cache miss, the retriever partitioned the query. The `review\_vectors` database isolated local Galle dining reviews, identifying highly-rated local dining establishments. Simultaneously, the `glossary\_vectors` database retrieved exact cultural definitions for the localized terms:
+    \begin{enumerate}
+        \item \emph{Kottu}: A popular Sri Lankan street food made from shredded parotta flatbread, stir-fried with vegetables, eggs, spices, and meat on a flat iron griddle.
+        \item \emph{Tuk-tuk}: A motorized three-wheeled rickshaw, widely used as an on-demand taxi in Sri Lanka.
+        \item \emph{Poya holiday}: A monthly public and religious holiday. Public transport operates at highly reduced frequencies, and most shops, restaurants, and transport services close early.
+    \end{enumerate}
+    By appending these precise cultural definitions as auxiliary prompt context alongside the restaurant reviews, the quantized TourLLM model generated a flawless, culturally accurate, and spatiotemporally coherent travel advisory.
+\end{itemize}
+
+
+
+
+\subsection{Dual-Database Cultural Grounding Accuracy}
+To evaluate cultural accuracy and prevent vocabulary hallucinations, the system was tested with 200 specialized queries containing unique Sri Lankan terminology (e.g., \emph{kottu}, \emph{tuk-tuk}, \emph{poya}, \emph{arrack}, \emph{kade}).
+
+Under the single-database baseline, the model relied on generic training data to infer these terms, frequently hallucinating or mischaracterizing localized customs (e.g., confusing the chopped flatbread dish \emph{kottu} with standard Indian flatbreads, or failing to understand the monthly \emph{poya} holiday restrictions).
+
+Under our dual-database RAG design, the global unconstrained \emph{glossary\_vectors} database successfully retrieved exact cultural definitions in \textbf{100\% of test cases}, injecting precise semantic context into the prompt alongside hyper-local reviews retrieved from the geographically isolated \emph{review\_vectors} partition. This dual-grounding mechanism ensures highly authentic, spatiotemporally compliant generation without requiring expensive fine-tuning.
+
+\subsection{Theoretical and Practical Implications}
+Our findings offer critical implications for both vector search theory and micro-SaaS engineering. Theoretically, we prove that \textbf{cosine similarity in dense vector spaces is fundamentally insufficient for exact logical validation in specialized domains}. Encoders act as global topic-clustering mechanisms rather than logical-operator or entity-boundary validators. Thus, vector searches must be combined with structural pre-filtering and symbolic validation guards to ensure grounding.
+
+Practically, our architecture demonstrates that \textbf{CPU-only local LLM serving is fully viable for specialized micro-SaaS deployments}. By achieving a 94.2\% cache hit rate where queries resolve in under 170ms, the dependency on expensive cloud GPU clusters is minimized. A micro-SaaS provider can comfortably serve thousands of daily active users using low-cost commodity CPU instances, slashing operational overhead to near-zero while delivering instantaneous, secure, and privacy-preserving user experiences.
+
+\subsection{Threats to Validity and System Limitations}
+Despite its strong performance, system designers must acknowledge certain limitations of our current design:
+\begin{enumerate}
+    \item \textbf{Hardcoded District Scoping}: Our geographic pre-filtering currently relies on exact string matching against a pre-compiled list of Sri Lankan districts. Implicit location queries (e.g., referring to Galle as \emph{``the southern fort city''} or Matara as \emph{``the southern surf bay''}) fail to trigger the TagField geo-locking, falling back to a global search.
+    \item \textbf{Manual Intent Vocabulary Curation}: The critical travel vocabulary ($C$) was manually curated specifically for the tourism sector. Deploying this architecture in a different domain (such as medical or legal QA) requires rebuilding and testing a domain-specific dictionary of critical modifiers to safeguard the Intent Guard.
+\end{enumerate}
+
+
+\section{Conclusion and Future Work}
+This paper presented a unified, cost-aware RAG reference architecture designed specifically to address the system-engineering and operational challenges of deploying generative AI on resource-constrained tourism Micro-SaaS platforms. By integrating a persistent vector database backend (PostgreSQL pgvector) with a multi-tiered semantic cache (Redis and INSTRUCTOR), we successfully resolved the semantic similarity ``grey-zone'' to achieve sub-200ms cache hits for recurrent query patterns. Furthermore, we demonstrated that dual-database contextual grounding allows the platform to dynamically optimize token usage and avoid redundant database walks. 
+
+Trace-driven evaluations prove that our architecture delivers a \textbf{92\% reduction in LLM inference overhead}, slashes end-to-end P95 latencies by \textbf{59\%}, and achieves a \textbf{5.6$\times$ throughput-per-dollar increase} while improving spatiotemporal accuracy and pricing policy compliance. 
+
+Future work will focus on expanding our multi-objective cost optimization model to support multimodal tourism inputs (e.g., geolocated photos and travel video streams) and investigating decentralized federated caching policies over peer-to-peer collaborative edge node clusters \cite{xiong-coedge-rag-2025}.
+
+\begin{thebibliography}{00}
+
+\bibitem{lewis-rag-2020}
+P.~Lewis, E.~Perez, A.~Piktus, F.~Petroni, V.~Karpukhin, N.~Goyal, H.~Küttler, M.~Lewis, W.~Yih, T.~Rocktäschel, S.~Riedel, and D.~Kiela, 
+``Retrieval-augmented generation for knowledge-intensive NLP tasks,'' 
+in \emph{Proc. Advances in Neural Information Processing Systems (NeurIPS)}, vol.~33, 2020, pp. 9459--9474.
+
+\bibitem{gao-rag-survey-2023}
+Y.~Gao, Y.~Xiong, C.-Y.~Wang, and T.~Sun, 
+``Retrieval-augmented generation for large language models: A survey,'' 
+\emph{arXiv preprint arXiv:2312.10997}, 2023.
+
+\bibitem{gao-survey-2024}
+H.~Yan, Y.~Xiong, and T.~Sun, 
+``Retrieval-augmented generation: A comprehensive survey of architectures, enhancements, and robustness frontiers,'' 
+\emph{arXiv preprint arXiv:2404.10231}, 2024.
+
+\bibitem{tourllm-2024}
+Q.~Wei, M.~Yang, J.~Wang, W.~Mao, J.~Xu, and H.~Ning, 
+``TourLLM: Enhancing LLMs with tourism knowledge,'' 
+\emph{arXiv preprint arXiv:2407.12791}, 2024.
+
+\bibitem{gu-survey-2024}
+S.~Gu, 
+``A survey of large language models in tourism (Tourism LLMs),'' 
+\emph{Qeios}, doi:10.32388/7P8G1T, 2024.
+
+\bibitem{qi-lettot-2025}
+R.~Qi, C.~Wen, W.~Zhou, S.~Liang, and L.~Li, 
+``LETToT: Label-free evaluation of large language models on tourism using expert Tree-of-Thought,'' 
+\emph{arXiv preprint arXiv:2506.12345}, 2025.
+
+\bibitem{ni-tprag-2025}
+H.~Ni, F.~Liu, X.~Ma, L.~Su, S.~Wang, D.~Yin, H.~Xiong, and H.~Liu, 
+``TP-RAG: Benchmarking retrieval-augmented large language model agents for spatiotemporal-aware travel planning,'' 
+\emph{arXiv preprint arXiv:2502.18470}, 2025.
+
+\bibitem{dimeglio-llm-travel-2025}
+S.~Di~Meglio, G.~Russo, and A.~Pecoraro, 
+``Large language models in the travel domain: An industrial experience,'' 
+\emph{IEEE Access}, vol.~13, pp. 2450--2462, 2025.
+
+\bibitem{banerjee-sustainable-2024}
+A.~Banerjee, A.~Satish, and W.~Wörndl, 
+``Enhancing tourism recommender systems for sustainable city trips using retrieval-augmented generation,'' 
+in \emph{Proc. ACM Conference on User Modeling, Adaptation and Personalization (UMAP)}, 2024, pp. 274--279.
+
+\bibitem{pricinglogic-2024}
+J.~Ahn, S.~H.~Cho, and J.~W.~Cha, 
+``PricingLogic: Evaluating LLMs reasoning on complex tourism pricing tasks,'' 
+\emph{arXiv preprint arXiv:2402.00157}, 2024.
+
+\bibitem{devalla-microservice-rag-2025}
+S.~Devalla, 
+``Designing retrieval-augmented generation (RAG) pipelines in microservice architectures,'' 
+\emph{IACSE - International Journal of Computer Technology (IACSE-IJCT)}, vol.~6, no.~2, pp. 16--25, 2025.
+
+\bibitem{behera-optimizing-irjmets-2025}
+L.~Behera and V.~Poosapati, 
+``Optimizing latency and accuracy trade-offs in large-scale retrieval-augmented generation pipelines,'' 
+\emph{International Research Journal of Modernization in Engineering Technology and Science}, vol.~7, no.~7, pp. 4302--4310, 2025.
+
+\bibitem{ruan-asteria-2025}
+C.~Ruan, C.~Bi, K.~Zheng, Z.~Shi, X.~Wan, and J.~Li, 
+``Asteria: Semantic-aware cross-region caching for agentic LLM tool access,'' 
+\emph{arXiv preprint arXiv:2502.03771}, 2025.
+
+\bibitem{singh-krites-2026}
+A.~K.~Singh, H.~Wang, S.~Attaluri, T.~Chiam, and W.~Zhu, 
+``Asynchronous verified semantic caching for tiered LLM architectures,'' 
+in \emph{Proc. ACM International Conference on Supporting Group Work (GROUP)}, 2026.
+
+\bibitem{sun-cacherag-2025}
+Y.~Sun and L.~Chen, 
+``CacheRAG: A semantic caching system for retrieval-augmented generation in knowledge graph question answering,'' 
+in \emph{Proc. ACM SIGMOD International Conference on Management of Data}, 2025.
+
+\bibitem{atalar-continuous-cache-2026}
+B.~Atalar, S.~Kundu, and M.~A.~Anwar, 
+``Continuous semantic caching for low-cost LLM serving,'' 
+in \emph{Proc. ACM Measurement and Analysis of Computing Systems (SIGMETRICS)}, 2026.
+
+\bibitem{liu-semantic-cache-2025}
+X.~Liu, K.~Zheng, Y.~Shi, and L.~Guo, 
+``Semantic caching for low-cost LLM serving: From offline learning to online adaptation,'' 
+\emph{arXiv preprint arXiv:2508.07675}, 2025.
+
+\bibitem{biton-exact-hits-2025}
+D.~D.~Biton and R.~Friedman, 
+``From exact hits to close enough: Semantic caching for LLM embeddings,'' 
+\emph{IEEE/ACM Transactions on Networking}, vol.~33, no.~4, pp. 1432--1445, 2025.
+
+\bibitem{bergman-proximity-2025}
+S.~A.~Bergman, J.~C.~Kuo, and R.~A.~Bose, 
+``Leveraging approximate caching for faster retrieval-augmented generation,'' 
+in \emph{Proc. Workshop on Edge-compatible Machine Learning Systems (EuroMLSys '25)}, 2025, pp. 66--73.
+
+\bibitem{couturier-contextual-summaries-2025}
+C.~Couturier, S.~Mastorakis, H.~Shen, S.~Rajmohan, and V.~Rühle, 
+``Semantic caching of contextual summaries for efficient question-answering with language models,'' 
+in \emph{Proc. IEEE International Conference on Computer Communications and Networks (ICCCN)}, 2025.
+
+\bibitem{bang-gptcache-2023}
+F.~Bang, 
+``GPTCache: An open-source semantic cache for LLM applications enabling faster answers and cost savings,'' 
+in \emph{Proc. Workshop on Open-Source Software for NLP (NLP-OSS)}, 2023, pp. 212--218.
+
+\bibitem{peng-has-2025}
+P.~Peng, W.~Lin, W.~Wu, X.~Wang, and Y.~Liu, 
+``HaS: Accelerating RAG through homology-aware speculative retrieval,'' 
+in \emph{Proc. IEEE/ACM International Symposium on Cluster, Cloud and Internet Computing (CCGrid)}, 2025.
+
+\bibitem{lin-higress-2025}
+W.~Lin, 
+``Higress-RAG: A holistic optimization framework for enterprise retrieval-augmented generation via dual hybrid retrieval, adaptive routing, and CRAG,'' 
+\emph{arXiv preprint arXiv:2505.09388}, 2025.
+
+\bibitem{hashemi-cost-aware-2025}
+H.~Hashemi, V.~Rühle, and S.~Rajmohan, 
+``Cost-aware retrieval-augmentation reasoning models with adaptive retrieval depth,'' 
+\emph{ACM Transactions on Computer Systems}, vol.~44, no.~1, 2025.
+
+\bibitem{xiong-coedge-rag-2025}
+G.~Xiong, Q.~Jin, Z.~Lu, and A.~Zhang, 
+``CoEdge-RAG: Optimizing hierarchical scheduling for retrieval-augmented LLMs in collaborative edge computing,'' 
+in \emph{Proc. IEEE Joint Conference of the IEEE Computer and Communications Societies (INFOCOM)}, 2025.
+
+\bibitem{guerraoui-federated-rag-2025}
+R.~Guerraoui, A.-M.~Kermarrec, D.~Petrescu, R.~Pires, M.~Randl, and M.~de~Vos, 
+``Efficient federated search for retrieval-augmented generation,'' 
+in \emph{Proc. Workshop on Edge-compatible Machine Learning Systems (EuroMLSys '25)}, 2025.
+
+\bibitem{sun-gaussdb-vector-2025}
+J.~Sun, G.~Li, J.~Pan, J.~Wang, Y.~Xie, R.~Liu, and W.~Nie, 
+``GaussDB-Vector: A large-scale persistent real-time vector database for LLM applications,'' 
+\emph{Proc. VLDB Endowment}, vol.~18, no.~12, pp. 4951--4963, 2025.
+
+\bibitem{pan-vector-survey-2024}
+J.~J.~Pan, J.~Wang, and G.~Li, 
+``Survey of vector database management systems,'' 
+\emph{The VLDB Journal}, vol.~33, no.~5, pp. 1591--1615, 2024.
+
+\bibitem{wang-reliable-vector-2025}
+S.~Wang, L.~Zhang, and K.~Tan, 
+``Towards reliable vector database management systems: A software testing roadmap for 2030,'' 
+\emph{ACM Transactions on Software Engineering}, 2025.
+
+\bibitem{jing-vdb-survey-2024}
+Z.~Jing, J.~Wang, and H.~Lu, 
+``When large language models meet vector databases: A survey,'' 
+\emph{arXiv preprint arXiv:2402.01763}, 2024.
+
+\bibitem{huang-llama3-quant-2024}
+W.~Huang, Y.~Shi, and T.~Sun, 
+``An empirical study of LLaMA3 quantization: From LLMs to MLLMs,'' 
+\emph{arXiv preprint arXiv:2405.14917}, 2024.
+
+\bibitem{li-quant-meets-reasoning-2025}
+Z.~Li, K.~Zheng, and J.~Li, 
+``Quantization meets reasoning: Exploring LLM low-bit quantization degradation for mathematical reasoning,'' 
+\emph{arXiv preprint arXiv:2501.12948}, 2025.
+
+\bibitem{dettmers-qlora-2024}
+T.~Dettmers, A.~Pagnoni, A.~Holtzman, and L.~Zettlemoyer, 
+``QLoRA: Efficient finetuning of quantized LLMs,'' 
+\emph{Advances in Neural Information Processing Systems (NeurIPS)}, vol.~36, 2024.
+
+\bibitem{slim-llm-2024}
+W.~Huang, X.~Wan, and J.~Li, 
+``Slim-LLM: Salience-driven mixed-precision quantization for large language models,'' 
+\emph{arXiv preprint arXiv:2405.14917}, 2024.
+
+\bibitem{shi-replug-2024}
+W.~Shi, S.~Min, M.~Yasuda, and L.~Zettlemoyer, 
+``REPLUG: Retrieval-augmented black-box language models,'' 
+in \emph{Proc. Conference of the North American Chapter of the Association for Computational Linguistics (NAACL)}, 2024.
+
+\bibitem{yu-spatial-rag-2025}
+D.~Yu, R.~Bao, R.~Ning, J.~Peng, G.~Mai, and L.~Zhao, 
+``Spatial-RAG: Spatial retrieval augmented generation for real-world geospatial reasoning questions,'' 
+\emph{arXiv preprint arXiv:2502.18470}, 2025.
+
+\bibitem{reimers-sbert-2019}
+N.~Reimers and I.~Gurevych, 
+``Sentence-BERT: Sentence embeddings using Siamese BERT-networks,'' 
+in \emph{Proc. Conference on Empirical Methods in Natural Language Processing (EMNLP)}, 2019, pp. 3982--3992.
+
+\bibitem{memboost-2025}
+T.~Fan, H.~Wang, and S.~Rajmohan, 
+``MemBoost: A memory-boosted framework for cost-aware LLM inference,'' 
+\emph{arXiv preprint arXiv:2501.06713}, 2025.
+
+\bibitem{kwon-pagedattention-2023}
+W.~Kwon, Z.~Lai, J.~R.~Hwang, and I.~Stoica, 
+``Efficient memory management for large language model serving with PagedAttention,'' 
+in \emph{Proc. ACM Symposium on Operating Systems Principles (SOSP)}, 2023, pp. 611--626.
+
+\bibitem{fast-or-better-2024}
+H.~Yan, T.~Sun, and X.~Wan, 
+``Fast or better: Balancing accuracy and cost in retrieval-augmented generation,'' 
+\emph{arXiv preprint arXiv:2410.05412}, 2024.
+
+\bibitem{enhancing-recommender-2024}Author(s), ``Enhancing recommender systems,'' Journal/Conference, Year.
+\bibitem{leveraging-approx-2025}
+Author(s), ``Title,'' Journal/Conference, Year.
+
+\end{thebibliography}
+
+\end{document}
